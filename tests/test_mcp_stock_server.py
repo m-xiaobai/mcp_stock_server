@@ -190,41 +190,48 @@ class MCPStockServerTests(unittest.TestCase):
         self.assertEqual(payload["failed"], 1)
         self.assertEqual(payload["errors"][0]["code"], "999999")
 
-    def test_insert_stock_daily_bars_after_close_tool_returns_summary(self):
+    def test_insert_stock_daily_bars_after_close_tool_fetches_and_upserts_today_rows(self):
         from mcp_stock_server.models.response_models import UpsertStockDailyBarsResponse
         from mcp_stock_server.tools.stock_tools import (
             insert_stock_daily_bars_after_close_tool,
         )
 
         class FakeStockDailyService:
+            def __init__(self):
+                self.loaded = None
+
             def upsert_stock_daily_bars(self, request):
+                self.loaded = request
                 return UpsertStockDailyBarsResponse(
                     time=request.time,
-                    total=1,
-                    success=1,
+                    total=len(request.daily_data),
+                    success=len(request.daily_data),
                     failed=0,
                     errors=[],
                 )
 
+        service = FakeStockDailyService()
         payload = insert_stock_daily_bars_after_close_tool(
-            FakeStockDailyService(),
-            {
-                "time": "2026-05-26",
-                "daily_data": [
-                    {
-                        "code": "600000",
-                        "open": "10.00",
-                        "close": "10.50",
-                        "high": "10.60",
-                        "low": "9.90",
-                        "vol": 1000,
-                        "amount": "1000000",
-                        "trade_date": "2026-05-26",
-                    }
-                ],
-            },
+            service,
+            {"time": "2026-05-26"},
+            fetch_codes=lambda: [{"code": "600000", "name": "浦发银行"}],
+            fetch_rows=lambda codes: [
+                {
+                    "code": "600000",
+                    "open": "10.00",
+                    "close": "10.50",
+                    "high": "10.60",
+                    "low": "9.90",
+                    "vol": 1000,
+                    "amount": "1000000",
+                    "trade_date": "2026-05-26",
+                }
+            ],
         )
 
+        self.assertEqual(service.loaded.time.isoformat(), "2026-05-26")
+        self.assertEqual(len(service.loaded.daily_data), 1)
+        self.assertEqual(service.loaded.daily_data[0].code, "600000")
         self.assertEqual(payload["total"], 1)
         self.assertEqual(payload["success"], 1)
         self.assertEqual(payload["failed"], 0)
@@ -746,6 +753,42 @@ class MCPStockServerTests(unittest.TestCase):
             payload,
             {"items": [{"code": "000001", "name": "平安银行"}]},
         )
+
+    def test_after_close_tool_accepts_only_time_argument(self):
+        if importlib.util.find_spec("mcp") is None:
+            self.skipTest("mcp package is not installed in the current test environment")
+        from mcp_stock_server.server import create_mcp_server
+
+        class FakeQueryService:
+            def list_stock_codes(self):
+                return []
+
+        class FakeWriteService:
+            pass
+
+        class FakeFastMCP:
+            def __init__(self, name):
+                self.name = name
+                self.registered = {}
+
+            def tool(self, name=None, description=None):
+                def decorator(func):
+                    self.registered[name or func.__name__] = func
+                    return func
+
+                return decorator
+
+        app = create_mcp_server(
+            FakeQueryService(),
+            FakeWriteService(),
+            fastmcp_cls=FakeFastMCP,
+        )
+
+        with self.assertRaises(TypeError):
+            app.registered["insert_stock_daily_bars_after_close"](
+                "2026-05-26",
+                [],
+            )
 
 
 if __name__ == "__main__":

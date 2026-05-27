@@ -48,6 +48,32 @@ def fetch_all_stock_daily(codes: list[str]) -> list[dict[str, object]]:
     return rows
 
 
+def fetch_today_stock_daily(codes: list[str]) -> list[dict[str, object]]:
+    from mootdx.quotes import Quotes
+
+    client = Quotes.factory(market="std")
+    rows: list[dict[str, object]] = []
+    for code in codes:
+        bars = client.bars(symbol=code, category=4, offset=1)
+        if bars is None or getattr(bars, "empty", False):
+            continue
+        latest_row = next(bars.iterrows())[1]
+        trade_date = str(latest_row["datetime"])[:10]
+        rows.append(
+            {
+                "code": str(code),
+                "open": latest_row["open"],
+                "close": latest_row["close"],
+                "high": latest_row["high"],
+                "low": latest_row["low"],
+                "vol": int(latest_row["vol"]),
+                "amount": latest_row["amount"],
+                "trade_date": trade_date,
+            }
+        )
+    return rows
+
+
 def initialize_stock_daily(
     stock_daily_service: StockDailyService,
     codes: list[str],

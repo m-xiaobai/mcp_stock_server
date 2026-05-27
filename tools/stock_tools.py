@@ -4,6 +4,8 @@ from dataclasses import asdict
 from datetime import date
 from typing import Any
 
+from ..init.init_stock_daily import fetch_today_stock_daily
+from ..init.init_stock_master import fetch_all_stock_codes
 from ..models import UpsertStockDailyBarsRequest
 from ..services import StockDailyService, StockMasterService
 
@@ -55,6 +57,23 @@ def upsert_stock_daily_bars_tool(
 
 
 def insert_stock_daily_bars_after_close_tool(
-    stock_daily_service: StockDailyService, payload: dict[str, Any]
+    stock_daily_service: StockDailyService,
+    payload: dict[str, Any],
+    fetch_codes=fetch_all_stock_codes,
+    fetch_rows=fetch_today_stock_daily,
 ) -> dict[str, Any]:
-    return upsert_stock_daily_bars_tool(stock_daily_service, payload)
+    codes = [row["code"] for row in fetch_codes()]
+    request = UpsertStockDailyBarsRequest.from_dict(
+        {
+            "time": payload["time"],
+            "daily_data": list(fetch_rows(codes)),
+        }
+    )
+    response = stock_daily_service.upsert_stock_daily_bars(request)
+    return {
+        "time": response.time.isoformat(),
+        "total": response.total,
+        "success": response.success,
+        "failed": response.failed,
+        "errors": [asdict(item) for item in response.errors],
+    }

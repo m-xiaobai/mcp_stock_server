@@ -48,10 +48,8 @@ def create_mcp_server(
         name="insert_stock_daily_bars_after_close",
         description="Insert stock daily bars after market close.",
     )
-    def insert_stock_daily_bars_after_close(
-        time: str, daily_data: list[dict[str, Any]]
-    ) -> dict[str, Any]:
-        payload = {"time": time, "daily_data": daily_data}
+    def insert_stock_daily_bars_after_close(time: str) -> dict[str, Any]:
+        payload = {"time": time}
         return insert_stock_daily_bars_after_close_tool(stock_daily_service, payload)
 
     return app
