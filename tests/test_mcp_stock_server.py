@@ -468,7 +468,7 @@ class MCPStockServerTests(unittest.TestCase):
         )
 
     def test_init_script_initializes_when_stock_master_is_empty(self):
-        from mcp_stock_server.init_stock_master import initialize_if_empty
+        from mcp_stock_server.init.init_stock_master import initialize_if_empty
 
         class FakeStockMasterService:
             def __init__(self):
@@ -492,7 +492,7 @@ class MCPStockServerTests(unittest.TestCase):
         self.assertEqual(inserted, 2)
 
     def test_init_script_skips_when_stock_master_not_empty(self):
-        from mcp_stock_server.init_stock_master import initialize_if_empty
+        from mcp_stock_server.init.init_stock_master import initialize_if_empty
         from mcp_stock_server.models.db_models import StockCodeItem
 
         class FakeStockMasterService:
@@ -518,7 +518,7 @@ class MCPStockServerTests(unittest.TestCase):
         self.assertFalse(service.initialized)
 
     def test_stock_daily_init_script_initializes_rows(self):
-        from mcp_stock_server.init_stock_daily import initialize_stock_daily
+        from mcp_stock_server.init.init_stock_daily import initialize_stock_daily
 
         class FakeStockDailyService:
             def __init__(self):

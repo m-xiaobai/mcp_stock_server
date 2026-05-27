@@ -14,8 +14,8 @@ if __package__ in (None, ""):
     from mcp_stock_server.main import build_mysql_services
     from mcp_stock_server.services.stock_master_service import StockMasterService
 else:
-    from .main import build_mysql_services
-    from .services.stock_master_service import StockMasterService
+    from ..main import build_mysql_services
+    from ..services.stock_master_service import StockMasterService
 
 
 def fetch_all_stock_codes() -> list[dict[str, str]]:

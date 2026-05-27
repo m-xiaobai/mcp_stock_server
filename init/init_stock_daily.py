@@ -11,15 +11,15 @@ if __package__ in (None, ""):
     if str(PROJECT_ROOT) not in sys.path:
         sys.path.insert(0, str(PROJECT_ROOT))
 
-    from mcp_stock_server.init_stock_master import fetch_all_stock_codes
+    from mcp_stock_server.init.init_stock_master import fetch_all_stock_codes
     from mcp_stock_server.main import build_mysql_services
     from mcp_stock_server.models.request_models import UpsertStockDailyBarsRequest
     from mcp_stock_server.services.stock_daily_service import StockDailyService
 else:
     from .init_stock_master import fetch_all_stock_codes
-    from .main import build_mysql_services
-    from .models.request_models import UpsertStockDailyBarsRequest
-    from .services.stock_daily_service import StockDailyService
+    from ..main import build_mysql_services
+    from ..models.request_models import UpsertStockDailyBarsRequest
+    from ..services.stock_daily_service import StockDailyService
 
 
 def fetch_all_stock_daily(codes: list[str]) -> list[dict[str, object]]:
