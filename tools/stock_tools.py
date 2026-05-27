@@ -52,3 +52,9 @@ def upsert_stock_daily_bars_tool(
         "failed": response.failed,
         "errors": [asdict(item) for item in response.errors],
     }
+
+
+def insert_stock_daily_bars_after_close_tool(
+    stock_daily_service: StockDailyService, payload: dict[str, Any]
+) -> dict[str, Any]:
+    return upsert_stock_daily_bars_tool(stock_daily_service, payload)

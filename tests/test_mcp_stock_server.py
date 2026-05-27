@@ -190,6 +190,45 @@ class MCPStockServerTests(unittest.TestCase):
         self.assertEqual(payload["failed"], 1)
         self.assertEqual(payload["errors"][0]["code"], "999999")
 
+    def test_insert_stock_daily_bars_after_close_tool_returns_summary(self):
+        from mcp_stock_server.models.response_models import UpsertStockDailyBarsResponse
+        from mcp_stock_server.tools.stock_tools import (
+            insert_stock_daily_bars_after_close_tool,
+        )
+
+        class FakeStockDailyService:
+            def upsert_stock_daily_bars(self, request):
+                return UpsertStockDailyBarsResponse(
+                    time=request.time,
+                    total=1,
+                    success=1,
+                    failed=0,
+                    errors=[],
+                )
+
+        payload = insert_stock_daily_bars_after_close_tool(
+            FakeStockDailyService(),
+            {
+                "time": "2026-05-26",
+                "daily_data": [
+                    {
+                        "code": "600000",
+                        "open": "10.00",
+                        "close": "10.50",
+                        "high": "10.60",
+                        "low": "9.90",
+                        "vol": 1000,
+                        "amount": "1000000",
+                        "trade_date": "2026-05-26",
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(payload["total"], 1)
+        self.assertEqual(payload["success"], 1)
+        self.assertEqual(payload["failed"], 0)
+
     def test_write_service_splits_insert_and_update_rows(self):
         from mcp_stock_server.models.request_models import UpsertStockDailyBarsRequest
         from mcp_stock_server.services.stock_daily_service import StockDailyService
@@ -664,6 +703,7 @@ class MCPStockServerTests(unittest.TestCase):
             sorted(app.registered.keys()),
             [
                 "get_stock_daily_bars",
+                "insert_stock_daily_bars_after_close",
                 "list_stock_codes",
                 "upsert_stock_daily_bars",
             ],

@@ -7,6 +7,7 @@ from mcp.server.fastmcp import FastMCP
 
 from .services import StockDailyService, StockMasterService
 from .tools import (
+    insert_stock_daily_bars_after_close_tool,
     get_stock_daily_bars_tool,
     list_stock_codes_tool,
     upsert_stock_daily_bars_tool,
@@ -42,6 +43,16 @@ def create_mcp_server(
     def upsert_stock_daily_bars(time: str, daily_data: list[dict[str, Any]]) -> dict[str, Any]:
         payload = {"time": time, "daily_data": daily_data}
         return upsert_stock_daily_bars_tool(stock_daily_service, payload)
+
+    @app.tool(
+        name="insert_stock_daily_bars_after_close",
+        description="Insert stock daily bars after market close.",
+    )
+    def insert_stock_daily_bars_after_close(
+        time: str, daily_data: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        payload = {"time": time, "daily_data": daily_data}
+        return insert_stock_daily_bars_after_close_tool(stock_daily_service, payload)
 
     return app
 
