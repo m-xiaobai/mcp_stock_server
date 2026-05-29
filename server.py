@@ -7,6 +7,10 @@ from mcp.server.fastmcp import FastMCP
 
 from .services import StockDailyService, StockMasterService
 from .tools import (
+    compute_amplitude_by_code_tool,
+    compute_kdj_by_code_tool,
+    compute_multi_trend_by_code_tool,
+    compute_short_trend_by_code_tool,
     insert_stock_daily_bars_after_close_tool,
     get_stock_daily_bars_tool,
     list_stock_codes_tool,
@@ -51,6 +55,80 @@ def create_mcp_server(
     def insert_stock_daily_bars_after_close(time: str) -> dict[str, Any]:
         payload = {"time": time}
         return insert_stock_daily_bars_after_close_tool(stock_daily_service, payload)
+
+    @app.tool(
+        name="compute_short_trend",
+        description="Load recent bars by stock code and compute Tongdaxin short trend EMA(EMA(C,10),10).",
+    )
+    def compute_short_trend(
+        time: str,
+        code: str,
+        period: int = 10,
+        limit: int = 120,
+    ) -> dict[str, Any]:
+        return compute_short_trend_by_code_tool(
+            stock_daily_service=stock_daily_service,
+            time=time,
+            code=code,
+            period=period,
+            limit=limit,
+        )
+
+    @app.tool(
+        name="compute_multi_trend",
+        description="Load recent bars by stock code and compute Tongdaxin multi-trend baseline.",
+    )
+    def compute_multi_trend(
+        time: str,
+        code: str,
+        periods: list[int] | None = None,
+        limit: int = 120,
+    ) -> dict[str, Any]:
+        return compute_multi_trend_by_code_tool(
+            stock_daily_service=stock_daily_service,
+            time=time,
+            code=code,
+            periods=periods,
+            limit=limit,
+        )
+
+    @app.tool(
+        name="compute_kdj",
+        description="Load recent bars by stock code and compute Tongdaxin KDJ indicator.",
+    )
+    def compute_kdj(
+        time: str,
+        code: str,
+        period: int = 9,
+        smooth_k: int = 3,
+        smooth_d: int = 3,
+        limit: int = 120,
+    ) -> dict[str, Any]:
+        return compute_kdj_by_code_tool(
+            stock_daily_service=stock_daily_service,
+            time=time,
+            code=code,
+            period=period,
+            smooth_k=smooth_k,
+            smooth_d=smooth_d,
+            limit=limit,
+        )
+
+    @app.tool(
+        name="compute_amplitude",
+        description="Load recent bars by stock code and compute today's B1 amplitude value.",
+    )
+    def compute_amplitude(
+        time: str,
+        code: str,
+        limit: int = 120,
+    ) -> dict[str, Any]:
+        return compute_amplitude_by_code_tool(
+            stock_daily_service=stock_daily_service,
+            time=time,
+            code=code,
+            limit=limit,
+        )
 
     return app
 

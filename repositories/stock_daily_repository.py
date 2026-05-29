@@ -41,7 +41,9 @@ class InMemoryStockDailyRepository:
                 if item.code == code and item.trade_date <= as_of
             ]
             rows.sort(key=lambda item: item.trade_date, reverse=True)
-            grouped.extend(rows[:limit])
+            recent_rows = rows[:limit]
+            recent_rows.sort(key=lambda item: item.trade_date)
+            grouped.extend(recent_rows)
         return grouped
 
     def existing_daily_keys(self, keys: list[tuple[str, date]]) -> set[tuple[str, date]]:
@@ -86,7 +88,7 @@ FROM (
     AND trade_date <= %s
 ) t
 WHERE t.rn <= %s
-ORDER BY stock_code, trade_date DESC
+ORDER BY stock_code, trade_date ASC
 """.strip()
         params = tuple(codes) + (as_of, limit)
         connection = self.connection_factory()
