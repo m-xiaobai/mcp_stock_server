@@ -11,8 +11,8 @@ from ..repositories import StockMasterRepository
 class StockMasterService:
     stock_master_repository: StockMasterRepository
 
-    def list_stock_codes(self) -> list[StockCodeItem]:
-        return self.stock_master_repository.list_all()
+    def list_stock_codes(self, offset: int, limit: int) -> tuple[int, list[StockCodeItem]]:
+        return self.stock_master_repository.list_page(offset=offset, limit=limit)
 
     def initialize_stock_master(self, rows: Iterable[Mapping[str, object]]) -> int:
         normalized = [

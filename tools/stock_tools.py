@@ -10,8 +10,26 @@ from ..models import UpsertStockDailyBarsRequest
 from ..services import StockDailyService, StockMasterService
 
 
-def list_stock_codes_tool(stock_master_service: StockMasterService) -> list[str]:
-    return [item.code for item in stock_master_service.list_stock_codes()]
+def list_stock_codes_tool(
+    stock_master_service: StockMasterService, payload: dict[str, Any]
+) -> dict[str, Any]:
+    offset = int(payload["offset"])
+    limit = int(payload["limit"])
+    if offset < 0:
+        raise ValueError("offset must be >= 0")
+    if limit <= 0:
+        raise ValueError("limit must be > 0")
+
+    total_count, rows = stock_master_service.list_stock_codes(offset=offset, limit=limit)
+    items = [item.code for item in rows]
+    return {
+        "total_count": total_count,
+        "offset": offset,
+        "limit": limit,
+        "has_more": offset + len(items) < total_count,
+        "items": items,
+        "display_notice": "Showing one page only. Data source is complete.",
+    }
 
 
 def get_stock_daily_bars_tool(
