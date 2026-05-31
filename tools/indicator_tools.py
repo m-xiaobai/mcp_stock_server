@@ -233,6 +233,29 @@ def _load_price_series(
     return as_of, highs, lows, closes
 
 
+def _load_price_series_by_codes(
+    stock_daily_service: StockDailyService,
+    time: str,
+    codes: list[str],
+    limit: int,
+) -> tuple[date, list[tuple[str, list[float], list[float], list[float]]]]:
+    as_of = date.fromisoformat(time)
+    response = stock_daily_service.get_stock_daily_bars(time=as_of, codes=codes, limit=limit)
+    item_map = {item.code: item for item in response.items}
+
+    results: list[tuple[str, list[float], list[float], list[float]]] = []
+    for code in codes:
+        item = item_map.get(code)
+        if item is None or not item.daily_bars:
+            raise ValueError(f"no daily bars found for code {code}")
+
+        highs = [float(Decimal(bar.high)) for bar in item.daily_bars]
+        lows = [float(Decimal(bar.low)) for bar in item.daily_bars]
+        closes = [float(Decimal(bar.close)) for bar in item.daily_bars]
+        results.append((code, highs, lows, closes))
+    return as_of, results
+
+
 def compute_short_trend_by_code_tool(
     stock_daily_service: StockDailyService,
     time: str,
@@ -267,42 +290,44 @@ def compute_multi_trend_by_code_tool(
 def compute_kdj_by_code_tool(
     stock_daily_service: StockDailyService,
     time: str,
-    code: str,
+    codes: list[str],
     period: int = 9,
     smooth_k: int = 3,
     smooth_d: int = 3,
     limit: int = 120,
 ) -> dict[str, Any]:
-    as_of, highs, lows, closes = _load_price_series(stock_daily_service, time, code, limit)
-    k, d, j = compute_kdj(
-        highs=highs,
-        lows=lows,
-        closes=closes,
-        period=period,
-        smooth_k=smooth_k,
-        smooth_d=smooth_d,
-    )
+    as_of, price_series_items = _load_price_series_by_codes(stock_daily_service, time, codes, limit)
+    items = []
+    for code, highs, lows, closes in price_series_items:
+        k, d, j = compute_kdj(
+            highs=highs,
+            lows=lows,
+            closes=closes,
+            period=period,
+            smooth_k=smooth_k,
+            smooth_d=smooth_d,
+        )
+        items.append({"code": code, "k": k, "d": d, "j": j})
     return {
         "time": as_of.isoformat(),
-        "code": code,
-        "k": k,
-        "d": d,
-        "j": j,
+        "items": items,
     }
 
 
 def compute_amplitude_by_code_tool(
     stock_daily_service: StockDailyService,
     time: str,
-    code: str,
+    codes: list[str],
     limit: int = 120,
 ) -> dict[str, Any]:
-    as_of, highs, lows, closes = _load_price_series(stock_daily_service, time, code, limit)
-    amplitudes = compute_amplitude(highs=highs, lows=lows, closes=closes)
-    if not amplitudes:
-        raise ValueError(f"no daily bars found for code {code}")
+    as_of, price_series_items = _load_price_series_by_codes(stock_daily_service, time, codes, limit)
     return {
         "time": as_of.isoformat(),
-        "code": code,
-        "value": amplitudes[-1],
+        "items": [
+            {
+                "code": code,
+                "value": compute_amplitude(highs=highs, lows=lows, closes=closes)[-1],
+            }
+            for code, highs, lows, closes in price_series_items
+        ],
     }

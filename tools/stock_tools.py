@@ -10,8 +10,8 @@ from ..models import UpsertStockDailyBarsRequest
 from ..services import StockDailyService, StockMasterService
 
 
-def list_stock_codes_tool(stock_master_service: StockMasterService) -> dict[str, Any]:
-    return {"items": [asdict(item) for item in stock_master_service.list_stock_codes()]}
+def list_stock_codes_tool(stock_master_service: StockMasterService) -> list[str]:
+    return [item.code for item in stock_master_service.list_stock_codes()]
 
 
 def get_stock_daily_bars_tool(

@@ -29,7 +29,7 @@ def create_mcp_server(
         name="list_stock_codes",
         description="Query all stock codes and names.",
     )
-    def list_stock_codes() -> dict[str, Any]:
+    def list_stock_codes() -> list[str]:
         return list_stock_codes_tool(stock_master_service)
 
     @app.tool(
@@ -98,7 +98,7 @@ def create_mcp_server(
     )
     def compute_kdj(
         time: str,
-        code: str,
+        codes: list[str],
         period: int = 9,
         smooth_k: int = 3,
         smooth_d: int = 3,
@@ -107,7 +107,7 @@ def create_mcp_server(
         return compute_kdj_by_code_tool(
             stock_daily_service=stock_daily_service,
             time=time,
-            code=code,
+            codes=codes,
             period=period,
             smooth_k=smooth_k,
             smooth_d=smooth_d,
@@ -120,13 +120,13 @@ def create_mcp_server(
     )
     def compute_amplitude(
         time: str,
-        code: str,
+        codes: list[str],
         limit: int = 120,
     ) -> dict[str, Any]:
         return compute_amplitude_by_code_tool(
             stock_daily_service=stock_daily_service,
             time=time,
-            code=code,
+            codes=codes,
             limit=limit,
         )
 
