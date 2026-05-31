@@ -62,14 +62,14 @@ def create_mcp_server(
     )
     def compute_short_trend(
         time: str,
-        code: str,
+        codes: list[str],
         period: int = 10,
         limit: int = 120,
     ) -> dict[str, Any]:
         return compute_short_trend_by_code_tool(
             stock_daily_service=stock_daily_service,
             time=time,
-            code=code,
+            codes=codes,
             period=period,
             limit=limit,
         )
@@ -80,14 +80,14 @@ def create_mcp_server(
     )
     def compute_multi_trend(
         time: str,
-        code: str,
+        codes: list[str],
         periods: list[int] | None = None,
         limit: int = 120,
     ) -> dict[str, Any]:
         return compute_multi_trend_by_code_tool(
             stock_daily_service=stock_daily_service,
             time=time,
-            code=code,
+            codes=codes,
             periods=periods,
             limit=limit,
         )

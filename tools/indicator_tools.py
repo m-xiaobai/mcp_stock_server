@@ -259,31 +259,41 @@ def _load_price_series_by_codes(
 def compute_short_trend_by_code_tool(
     stock_daily_service: StockDailyService,
     time: str,
-    code: str,
+    codes: list[str],
     period: int = 10,
     limit: int = 120,
 ) -> dict[str, Any]:
-    as_of, _, _, closes = _load_price_series(stock_daily_service, time, code, limit)
+    as_of, price_series_items = _load_price_series_by_codes(stock_daily_service, time, codes, limit)
     return {
         "time": as_of.isoformat(),
-        "code": code,
-        "values": compute_short_trend(closes=closes, period=period),
+        "items": [
+            {
+                "code": code,
+                "values": compute_short_trend(closes=closes, period=period),
+            }
+            for code, _, _, closes in price_series_items
+        ],
     }
 
 
 def compute_multi_trend_by_code_tool(
     stock_daily_service: StockDailyService,
     time: str,
-    code: str,
+    codes: list[str],
     periods: list[int] | None = None,
     limit: int = 120,
 ) -> dict[str, Any]:
-    as_of, _, _, closes = _load_price_series(stock_daily_service, time, code, limit)
+    as_of, price_series_items = _load_price_series_by_codes(stock_daily_service, time, codes, limit)
     normalized_periods = tuple(periods) if periods is not None else B1_PERIODS
     return {
         "time": as_of.isoformat(),
-        "code": code,
-        "values": compute_multi_trend(closes=closes, periods=normalized_periods),
+        "items": [
+            {
+                "code": code,
+                "values": compute_multi_trend(closes=closes, periods=normalized_periods),
+            }
+            for code, _, _, closes in price_series_items
+        ],
     }
 
 

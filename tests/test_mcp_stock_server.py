@@ -265,21 +265,47 @@ class MCPStockServerTests(unittest.TestCase):
                                     amount=Decimal("1100000"),
                                 ),
                             ],
-                        )
+                        ),
+                        StockDailyBarsItem(
+                            code="000001",
+                            daily_bars=[
+                                DailyBar(
+                                    code="000001",
+                                    trade_date=date(2026, 5, 25),
+                                    open=Decimal("8.00"),
+                                    close=Decimal("8.20"),
+                                    high=Decimal("8.30"),
+                                    low=Decimal("7.90"),
+                                    vol=800,
+                                    amount=Decimal("800000"),
+                                ),
+                                DailyBar(
+                                    code="000001",
+                                    trade_date=date(2026, 5, 26),
+                                    open=Decimal("8.20"),
+                                    close=Decimal("8.50"),
+                                    high=Decimal("8.60"),
+                                    low=Decimal("8.10"),
+                                    vol=850,
+                                    amount=Decimal("830000"),
+                                ),
+                            ],
+                        ),
                     ],
                 )
 
         payload = compute_short_trend_by_code_tool(
             FakeStockDailyService(),
             time="2026-05-26",
-            code="600000",
+            codes=["600000", "000001"],
             period=2,
             limit=20,
         )
 
         self.assertEqual(payload["time"], "2026-05-26")
-        self.assertEqual(payload["code"], "600000")
-        self.assertEqual(len(payload["values"]), 2)
+        self.assertEqual([item["code"] for item in payload["items"]], ["600000", "000001"])
+        self.assertEqual(len(payload["items"][0]["values"]), 2)
+        self.assertEqual(len(payload["items"][1]["values"]), 2)
 
     def test_compute_multi_trend_by_code_tool_loads_bars_from_service(self):
         from datetime import date
@@ -337,21 +363,67 @@ class MCPStockServerTests(unittest.TestCase):
                                     amount=Decimal("1000000"),
                                 ),
                             ],
-                        )
+                        ),
+                        StockDailyBarsItem(
+                            code="000001",
+                            daily_bars=[
+                                DailyBar(
+                                    code="000001",
+                                    trade_date=date(2026, 5, 23),
+                                    open=Decimal("8.00"),
+                                    close=Decimal("8.00"),
+                                    high=Decimal("8.10"),
+                                    low=Decimal("7.90"),
+                                    vol=800,
+                                    amount=Decimal("800000"),
+                                ),
+                                DailyBar(
+                                    code="000001",
+                                    trade_date=date(2026, 5, 24),
+                                    open=Decimal("8.00"),
+                                    close=Decimal("9.00"),
+                                    high=Decimal("9.10"),
+                                    low=Decimal("7.95"),
+                                    vol=820,
+                                    amount=Decimal("820000"),
+                                ),
+                                DailyBar(
+                                    code="000001",
+                                    trade_date=date(2026, 5, 25),
+                                    open=Decimal("9.00"),
+                                    close=Decimal("10.00"),
+                                    high=Decimal("10.10"),
+                                    low=Decimal("8.90"),
+                                    vol=840,
+                                    amount=Decimal("840000"),
+                                ),
+                                DailyBar(
+                                    code="000001",
+                                    trade_date=date(2026, 5, 26),
+                                    open=Decimal("10.00"),
+                                    close=Decimal("11.00"),
+                                    high=Decimal("11.10"),
+                                    low=Decimal("9.90"),
+                                    vol=860,
+                                    amount=Decimal("860000"),
+                                ),
+                            ],
+                        ),
                     ],
                 )
 
         payload = compute_multi_trend_by_code_tool(
             FakeStockDailyService(),
             time="2026-05-26",
-            code="600000",
+            codes=["600000", "000001"],
             periods=[2, 3],
             limit=20,
         )
 
         self.assertEqual(payload["time"], "2026-05-26")
-        self.assertEqual(payload["code"], "600000")
-        self.assertEqual(payload["values"][0], None)
+        self.assertEqual([item["code"] for item in payload["items"]], ["600000", "000001"])
+        self.assertEqual(payload["items"][0]["values"][0], None)
+        self.assertEqual(payload["items"][1]["values"][0], None)
 
     def test_compute_kdj_by_code_tool_loads_bars_from_service(self):
         from datetime import date
@@ -1272,10 +1344,89 @@ class MCPStockServerTests(unittest.TestCase):
             FakeWriteService(),
             fastmcp_cls=FakeFastMCP,
         )
-        payload = app.registered["compute_short_trend"]("2026-05-26", "000001", 2, 20)
+        payload = app.registered["compute_short_trend"]("2026-05-26", ["000001"], 2, 20)
 
-        self.assertEqual(payload["code"], "000001")
-        self.assertEqual(len(payload["values"]), 2)
+        self.assertEqual(payload["items"][0]["code"], "000001")
+        self.assertEqual(len(payload["items"][0]["values"]), 2)
+
+    def test_registered_multi_trend_tool_returns_expected_payload_for_codes(self):
+        if importlib.util.find_spec("mcp") is None:
+            self.skipTest("mcp package is not installed in the current test environment")
+        from mcp_stock_server.server import create_mcp_server
+
+        class FakeQueryService:
+            def list_stock_codes(self):
+                return []
+
+        class FakeWriteService:
+            def get_stock_daily_bars(self, time, codes, limit=120):
+                from datetime import date
+                from decimal import Decimal
+                from mcp_stock_server.models.db_models import DailyBar, StockDailyBarsItem
+                from mcp_stock_server.models.response_models import GetStockDailyBarsResponse
+
+                return GetStockDailyBarsResponse(
+                    time=time,
+                    items=[
+                        StockDailyBarsItem(
+                            code="000001",
+                            daily_bars=[
+                                DailyBar(
+                                    code="000001",
+                                    trade_date=date(2026, 5, 23),
+                                    open=Decimal("10.00"),
+                                    close=Decimal("10.00"),
+                                    high=Decimal("10.10"),
+                                    low=Decimal("9.90"),
+                                    vol=1000,
+                                    amount=Decimal("1000000"),
+                                ),
+                                DailyBar(
+                                    code="000001",
+                                    trade_date=date(2026, 5, 24),
+                                    open=Decimal("10.00"),
+                                    close=Decimal("11.00"),
+                                    high=Decimal("11.10"),
+                                    low=Decimal("9.95"),
+                                    vol=1000,
+                                    amount=Decimal("1000000"),
+                                ),
+                                DailyBar(
+                                    code="000001",
+                                    trade_date=date(2026, 5, 25),
+                                    open=Decimal("11.00"),
+                                    close=Decimal("12.00"),
+                                    high=Decimal("12.10"),
+                                    low=Decimal("10.90"),
+                                    vol=1000,
+                                    amount=Decimal("1000000"),
+                                ),
+                            ],
+                        )
+                    ],
+                )
+
+        class FakeFastMCP:
+            def __init__(self, name):
+                self.name = name
+                self.registered = {}
+
+            def tool(self, name=None, description=None):
+                def decorator(func):
+                    self.registered[name or func.__name__] = func
+                    return func
+
+                return decorator
+
+        app = create_mcp_server(
+            FakeQueryService(),
+            FakeWriteService(),
+            fastmcp_cls=FakeFastMCP,
+        )
+        payload = app.registered["compute_multi_trend"]("2026-05-26", ["000001"], [2, 3], 20)
+
+        self.assertEqual(payload["items"][0]["code"], "000001")
+        self.assertEqual(payload["items"][0]["values"][0], None)
 
     def test_registered_kdj_tool_returns_expected_payload_for_codes(self):
         if importlib.util.find_spec("mcp") is None:
