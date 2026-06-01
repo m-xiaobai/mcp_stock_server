@@ -178,6 +178,134 @@ class MCPStockServerTests(unittest.TestCase):
         self.assertEqual(payload["items"][0]["code"], "600000")
         self.assertEqual(payload["items"][0]["daily_bars"][0]["close"], "10.50")
 
+    def test_screen_b1_stocks_tool_returns_only_selected_codes(self):
+        from mcp_stock_server.tools.stock_tools import screen_b1_stocks_tool
+
+        class FakeStockMasterService:
+            def list_stock_codes(self):
+                return ["000001", "000002", "000003"]
+
+        class FakeStockDailyService:
+            def __init__(self):
+                self.calls = []
+
+            def get_stock_daily_bars(self, time, codes, limit=120):
+                self.calls.append(("bars", list(codes)))
+                return type(
+                    "Response",
+                    (),
+                    {
+                        "time": time,
+                        "items": [
+                            type(
+                                "Item",
+                                (),
+                                {
+                                    "code": "000001",
+                                    "daily_bars": [
+                                        type("Bar", (), {"close": "10.50"})(),
+                                    ],
+                                },
+                            )()
+                        ],
+                    },
+                )()
+
+        payload = screen_b1_stocks_tool(
+            stock_master_service=FakeStockMasterService(),
+            stock_daily_service=FakeStockDailyService(),
+            payload={"time": "2026-05-26"},
+            compute_amplitude_fn=lambda stock_daily_service, time, codes, limit=120: {
+                "time": time,
+                "items": [
+                    {"code": "000001", "value": 6.5},
+                    {"code": "000002", "value": 8.1},
+                    {"code": "000003", "value": 6.8},
+                ],
+            },
+            compute_kdj_fn=lambda stock_daily_service, time, codes, period=9, smooth_k=3, smooth_d=3, limit=120: {
+                "time": time,
+                "items": [
+                    {"code": "000001", "j": [30.0, 18.0]},
+                    {"code": "000003", "j": [40.0, 25.0]},
+                ],
+            },
+            compute_multi_trend_fn=lambda stock_daily_service, time, codes, periods=None, limit=120: {
+                "time": time,
+                "items": [
+                    {"code": "000001", "values": [9.80, 10.10]},
+                ],
+            },
+            compute_short_trend_fn=lambda stock_daily_service, time, codes, period=10, limit=120: {
+                "time": time,
+                "items": [
+                    {"code": "000001", "values": [10.00, 10.30]},
+                ],
+            },
+            get_bars_fn=lambda stock_daily_service, payload: {
+                "time": payload["time"],
+                "items": [
+                    {
+                        "code": "000001",
+                        "daily_bars": [
+                            {"close": "10.50"},
+                        ],
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(payload["time"], "2026-05-26")
+        self.assertEqual(payload["total_candidates"], 3)
+        self.assertEqual(payload["selected_count"], 1)
+        self.assertEqual(
+            payload["items"],
+            [
+                {
+                    "code": "000001",
+                    "amplitude": 6.5,
+                    "j": 18.0,
+                    "multi_trend": 10.1,
+                    "short_trend": 10.3,
+                    "close": 10.5,
+                }
+            ],
+        )
+
+    def test_screen_b1_stocks_tool_short_circuits_when_first_step_empty(self):
+        from mcp_stock_server.tools.stock_tools import screen_b1_stocks_tool
+
+        class FakeStockMasterService:
+            def list_stock_codes(self):
+                return ["000001", "000002"]
+
+        class FakeStockDailyService:
+            pass
+
+        def _unexpected(*args, **kwargs):
+            raise AssertionError("later steps should not be called after short circuit")
+
+        payload = screen_b1_stocks_tool(
+            stock_master_service=FakeStockMasterService(),
+            stock_daily_service=FakeStockDailyService(),
+            payload={"time": "2026-05-26"},
+            compute_amplitude_fn=lambda stock_daily_service, time, codes, limit=120: {
+                "time": time,
+                "items": [
+                    {"code": "000001", "value": 7.2},
+                    {"code": "000002", "value": 8.1},
+                ],
+            },
+            compute_kdj_fn=_unexpected,
+            compute_multi_trend_fn=_unexpected,
+            compute_short_trend_fn=_unexpected,
+            get_bars_fn=_unexpected,
+        )
+
+        self.assertEqual(payload["total_candidates"], 2)
+        self.assertEqual(payload["selected_count"], 0)
+        self.assertEqual(payload["items"], [])
+
     def test_compute_short_trend_tool_returns_series(self):
         from mcp_stock_server.tools.indicator_tools import compute_short_trend_tool
 
@@ -1241,6 +1369,7 @@ class MCPStockServerTests(unittest.TestCase):
                 "get_stock_daily_bars",
                 "insert_stock_daily_bars_after_close",
                 "list_stock_codes",
+                "screen_b1_stocks",
                 "upsert_stock_daily_bars",
             ],
         )
@@ -1279,6 +1408,81 @@ class MCPStockServerTests(unittest.TestCase):
         payload = app.registered["list_stock_codes"]()
 
         self.assertEqual(payload, ["000001"])
+
+    def test_registered_b1_screener_tool_returns_selected_codes(self):
+        if importlib.util.find_spec("mcp") is None:
+            self.skipTest("mcp package is not installed in the current test environment")
+        from mcp_stock_server.server import create_mcp_server
+
+        class FakeQueryService:
+            def list_stock_codes(self):
+                return ["000001", "000002"]
+
+        class FakeWriteService:
+            def get_stock_daily_bars(self, time, codes, limit=120):
+                from datetime import date
+                from decimal import Decimal
+                from mcp_stock_server.models.db_models import DailyBar, StockDailyBarsItem
+                from mcp_stock_server.models.response_models import GetStockDailyBarsResponse
+
+                return GetStockDailyBarsResponse(
+                    time=time,
+                    items=[
+                        StockDailyBarsItem(
+                            code="000001",
+                            daily_bars=[
+                                DailyBar(
+                                    code="000001",
+                                    trade_date=date(2026, 5, 26),
+                                    open=Decimal("10.00"),
+                                    close=Decimal("10.50"),
+                                    high=Decimal("10.60"),
+                                    low=Decimal("9.90"),
+                                    vol=1000,
+                                    amount=Decimal("1000000"),
+                                ),
+                            ],
+                        ),
+                        StockDailyBarsItem(
+                            code="000002",
+                            daily_bars=[
+                                DailyBar(
+                                    code="000002",
+                                    trade_date=date(2026, 5, 26),
+                                    open=Decimal("9.00"),
+                                    close=Decimal("9.10"),
+                                    high=Decimal("9.20"),
+                                    low=Decimal("8.90"),
+                                    vol=900,
+                                    amount=Decimal("900000"),
+                                ),
+                            ],
+                        ),
+                    ],
+                )
+
+        class FakeFastMCP:
+            def __init__(self, name):
+                self.name = name
+                self.registered = {}
+
+            def tool(self, name=None, description=None):
+                def decorator(func):
+                    self.registered[name or func.__name__] = func
+                    return func
+
+                return decorator
+
+        app = create_mcp_server(
+            FakeQueryService(),
+            FakeWriteService(),
+            fastmcp_cls=FakeFastMCP,
+        )
+        payload = app.registered["screen_b1_stocks"]("2026-05-26")
+
+        self.assertEqual(payload["time"], "2026-05-26")
+        self.assertIn("selected_count", payload)
+        self.assertIn("items", payload)
 
     def test_registered_indicator_tool_returns_expected_payload(self):
         if importlib.util.find_spec("mcp") is None:

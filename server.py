@@ -14,6 +14,7 @@ from .tools import (
     insert_stock_daily_bars_after_close_tool,
     get_stock_daily_bars_tool,
     list_stock_codes_tool,
+    screen_b1_stocks_tool,
     upsert_stock_daily_bars_tool,
 )
 
@@ -128,6 +129,18 @@ def create_mcp_server(
             time=time,
             codes=codes,
             limit=limit,
+        )
+
+    @app.tool(
+        name="screen_b1_stocks",
+        description="Screen stocks by B1 conditions with batch short-circuit filtering.",
+    )
+    def screen_b1_stocks(time: str) -> dict[str, Any]:
+        payload = {"time": time}
+        return screen_b1_stocks_tool(
+            stock_master_service=stock_master_service,
+            stock_daily_service=stock_daily_service,
+            payload=payload,
         )
 
     return app
