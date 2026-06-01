@@ -133,7 +133,7 @@ def create_mcp_server(
 
     @app.tool(
         name="screen_b1_stocks",
-        description="Authoritative B1 stock screener:short trend > multi-trend, close > multi-trend, J < 20, amplitude < 7%.Returns only stocks that pass all B1 conditions.",
+        description="Authoritative B1 stock screener: short trend > multi-trend, close > multi-trend, J < 20, amplitude < 7%. Returns only stock codes that pass all B1 conditions.",
     )
     def screen_b1_stocks(time: str) -> dict[str, Any]:
         payload = {"time": time}

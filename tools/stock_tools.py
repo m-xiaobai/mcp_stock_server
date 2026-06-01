@@ -154,28 +154,19 @@ def screen_b1_stocks_tool(
         for item in bars_response["items"]
     }
 
-    selected_items = []
+    selected_codes: list[str] = []
     for code in remaining_codes:
         multi_trend = multi_trend_map.get(code)
         close_value = close_map.get(code)
         if multi_trend is None or close_value is None or close_value <= multi_trend:
             continue
-        selected_items.append(
-            {
-                "code": code,
-                "amplitude": amplitude_map[code],
-                "j": j_map[code],
-                "multi_trend": multi_trend,
-                "short_trend": short_trend_map[code],
-                "close": close_value,
-            }
-        )
+        selected_codes.append(code)
 
     return {
         "time": time,
         "total_candidates": total_candidates,
-        "selected_count": len(selected_items),
-        "items": selected_items,
+        "selected_count": len(selected_codes),
+        "items": selected_codes,
     }
 
 

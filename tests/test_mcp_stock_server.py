@@ -258,19 +258,7 @@ class MCPStockServerTests(unittest.TestCase):
         self.assertEqual(payload["time"], "2026-05-26")
         self.assertEqual(payload["total_candidates"], 3)
         self.assertEqual(payload["selected_count"], 1)
-        self.assertEqual(
-            payload["items"],
-            [
-                {
-                    "code": "000001",
-                    "amplitude": 6.5,
-                    "j": 18.0,
-                    "multi_trend": 10.1,
-                    "short_trend": 10.3,
-                    "close": 10.5,
-                }
-            ],
-        )
+        self.assertEqual(payload["items"], ["000001"])
 
     def test_screen_b1_stocks_tool_short_circuits_when_first_step_empty(self):
         from mcp_stock_server.tools.stock_tools import screen_b1_stocks_tool
@@ -368,10 +356,10 @@ class MCPStockServerTests(unittest.TestCase):
             },
         )
 
+        self.assertEqual(payload["items"], ["000001"])
         self.assertEqual(observed_codes, [["000001", "000002"]])
         self.assertEqual(payload["total_candidates"], 2)
         self.assertEqual(payload["selected_count"], 1)
-        self.assertEqual(payload["items"][0]["code"], "000001")
 
     def test_compute_short_trend_tool_returns_series(self):
         from mcp_stock_server.tools.indicator_tools import compute_short_trend_tool
