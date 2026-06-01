@@ -306,6 +306,73 @@ class MCPStockServerTests(unittest.TestCase):
         self.assertEqual(payload["selected_count"], 0)
         self.assertEqual(payload["items"], [])
 
+    def test_screen_b1_stocks_tool_accepts_stock_code_items_from_master_service(self):
+        from mcp_stock_server.models.db_models import StockCodeItem
+        from mcp_stock_server.tools.stock_tools import screen_b1_stocks_tool
+
+        class FakeStockMasterService:
+            def list_stock_codes(self):
+                return [
+                    StockCodeItem(code="000001", name="平安银行"),
+                    StockCodeItem(code="000002", name="万科A"),
+                ]
+
+        class FakeStockDailyService:
+            pass
+
+        observed_codes: list[list[str]] = []
+
+        def _capture_codes(stock_daily_service, time, codes, **kwargs):
+            observed_codes.append(list(codes))
+            return {
+                "time": time,
+                "items": [
+                    {"code": "000001", "value": 6.5},
+                    {"code": "000002", "value": 7.8},
+                ],
+            }
+
+        payload = screen_b1_stocks_tool(
+            stock_master_service=FakeStockMasterService(),
+            stock_daily_service=FakeStockDailyService(),
+            payload={"time": "2026-05-26"},
+            compute_amplitude_fn=_capture_codes,
+            compute_kdj_fn=lambda stock_daily_service, time, codes, period=9, smooth_k=3, smooth_d=3, limit=120: {
+                "time": time,
+                "items": [
+                    {"code": "000001", "j": [30.0, 18.0]},
+                ],
+            },
+            compute_multi_trend_fn=lambda stock_daily_service, time, codes, periods=None, limit=120: {
+                "time": time,
+                "items": [
+                    {"code": "000001", "values": [9.80, 10.10]},
+                ],
+            },
+            compute_short_trend_fn=lambda stock_daily_service, time, codes, period=10, limit=120: {
+                "time": time,
+                "items": [
+                    {"code": "000001", "values": [10.00, 10.30]},
+                ],
+            },
+            get_bars_fn=lambda stock_daily_service, payload: {
+                "time": payload["time"],
+                "items": [
+                    {
+                        "code": "000001",
+                        "daily_bars": [
+                            {"close": "10.50"},
+                        ],
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(observed_codes, [["000001", "000002"]])
+        self.assertEqual(payload["total_candidates"], 2)
+        self.assertEqual(payload["selected_count"], 1)
+        self.assertEqual(payload["items"][0]["code"], "000001")
+
     def test_compute_short_trend_tool_returns_series(self):
         from mcp_stock_server.tools.indicator_tools import compute_short_trend_tool
 

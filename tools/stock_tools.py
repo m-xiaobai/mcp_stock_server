@@ -60,7 +60,10 @@ def screen_b1_stocks_tool(
     get_bars_fn=get_stock_daily_bars_tool,
 ) -> dict[str, Any]:
     time = payload["time"]
-    candidate_codes = list(stock_master_service.list_stock_codes())
+    candidate_codes = [
+        item.code if hasattr(item, "code") else str(item)
+        for item in stock_master_service.list_stock_codes()
+    ]
     total_candidates = len(candidate_codes)
     if not candidate_codes:
         return {
