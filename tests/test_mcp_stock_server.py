@@ -126,65 +126,20 @@ class MCPStockServerTests(unittest.TestCase):
 
         self.assertEqual([row.trade_date.isoformat() for row in rows], ["2026-05-25", "2026-05-26"])
 
-    def test_list_stock_codes_tool_returns_paginated_items(self):
+    def test_list_stock_codes_tool_returns_serialized_items(self):
         from mcp_stock_server.models.db_models import StockCodeItem
         from mcp_stock_server.tools.stock_tools import list_stock_codes_tool
 
         class FakeStockMasterService:
-            def list_stock_codes(self, offset, limit):
-                self.last_call = (offset, limit)
-                return (
-                    3,
-                    [
-                        StockCodeItem(code="000001", name="平安银行"),
-                        StockCodeItem(code="000002", name="万科A"),
-                    ],
-                )
+            def list_stock_codes(self):
+                return [
+                    StockCodeItem(code="600000", name="浦发银行"),
+                    StockCodeItem(code="000001", name="平安银行"),
+                ]
 
-        service = FakeStockMasterService()
-        payload = list_stock_codes_tool(service, {"offset": 0, "limit": 2})
+        payload = list_stock_codes_tool(FakeStockMasterService())
 
-        self.assertEqual(service.last_call, (0, 2))
-        self.assertEqual(
-            payload,
-            {
-                "total_count": 3,
-                "offset": 0,
-                "limit": 2,
-                "has_more": True,
-                "items": ["000001", "000002"],
-                "display_notice": "Showing one page only. Data source is complete.",
-            },
-        )
-
-    def test_list_stock_codes_tool_returns_last_page_without_more_flag(self):
-        from mcp_stock_server.models.db_models import StockCodeItem
-        from mcp_stock_server.tools.stock_tools import list_stock_codes_tool
-
-        class FakeStockMasterService:
-            def list_stock_codes(self, offset, limit):
-                return (
-                    3,
-                    [StockCodeItem(code="600000", name="浦发银行")],
-                )
-
-        payload = list_stock_codes_tool(FakeStockMasterService(), {"offset": 2, "limit": 2})
-
-        self.assertEqual(payload["has_more"], False)
-        self.assertEqual(payload["items"], ["600000"])
-
-    def test_list_stock_codes_tool_rejects_invalid_offset_and_limit(self):
-        from mcp_stock_server.tools.stock_tools import list_stock_codes_tool
-
-        class FakeStockMasterService:
-            def list_stock_codes(self, offset, limit):
-                raise AssertionError("service should not be called for invalid input")
-
-        with self.assertRaises(ValueError):
-            list_stock_codes_tool(FakeStockMasterService(), {"offset": -1, "limit": 100})
-
-        with self.assertRaises(ValueError):
-            list_stock_codes_tool(FakeStockMasterService(), {"offset": 0, "limit": 0})
+        self.assertEqual(payload, ["600000", "000001"])
 
     def test_get_stock_daily_bars_tool_returns_serialized_bars(self):
         from mcp_stock_server.models.db_models import DailyBar, StockDailyBarsItem
@@ -829,48 +784,7 @@ class MCPStockServerTests(unittest.TestCase):
         self.assertEqual(daily_repo.updated[0].code, "000001")
         self.assertEqual(daily_repo.inserted[0].code, "000002")
 
-    def test_stock_master_service_returns_paginated_codes(self):
-        from mcp_stock_server.models.db_models import StockCodeItem
-        from mcp_stock_server.services.stock_master_service import StockMasterService
-
-        class FakeMasterRepository:
-            def list_page(self, offset, limit):
-                self.last_call = (offset, limit)
-                return (
-                    3,
-                    [
-                        StockCodeItem(code="000001", name="平安银行"),
-                        StockCodeItem(code="000002", name="万科A"),
-                    ],
-                )
-
-        repository = FakeMasterRepository()
-        service = StockMasterService(stock_master_repository=repository)
-
-        total_count, items = service.list_stock_codes(offset=0, limit=2)
-
-        self.assertEqual(repository.last_call, (0, 2))
-        self.assertEqual(total_count, 3)
-        self.assertEqual([item.code for item in items], ["000001", "000002"])
-
-    def test_inmemory_stock_master_repository_lists_codes_by_page_in_code_order(self):
-        from mcp_stock_server.models.db_models import StockCodeItem
-        from mcp_stock_server.repositories.stock_master_repository import InMemoryStockMasterRepository
-
-        repository = InMemoryStockMasterRepository(
-            items=[
-                StockCodeItem(code="600000", name="浦发银行"),
-                StockCodeItem(code="000002", name="万科A"),
-                StockCodeItem(code="000001", name="平安银行"),
-            ]
-        )
-
-        total_count, items = repository.list_page(offset=0, limit=2)
-
-        self.assertEqual(total_count, 3)
-        self.assertEqual([item.code for item in items], ["000001", "000002"])
-
-    def test_mysql_stock_master_repository_lists_codes_by_page(self):
+    def test_mysql_stock_master_repository_lists_all_codes(self):
         from mcp_stock_server.repositories.stock_master_repository import MySQLStockMasterRepository
 
         class FakeCursor:
@@ -891,34 +805,27 @@ class MCPStockServerTests(unittest.TestCase):
                 return False
 
         class FakeConnection:
-            def __init__(self, cursor_rows):
-                self.cursor_rows = list(cursor_rows)
+            def __init__(self, rows):
+                self.rows = rows
                 self.cursors = []
 
             def cursor(self):
-                cursor = FakeCursor(self.cursor_rows.pop(0))
+                cursor = FakeCursor(self.rows)
                 self.cursors.append(cursor)
                 return cursor
 
         connection = FakeConnection(
             [
-                [{"total_count": 2}],
-                [
-                    {"code": "000001", "name": "平安银行"},
-                    {"code": "000002", "name": "万科A"},
-                ],
+                {"code": "000001", "name": "平安银行"},
+                {"code": "000002", "name": "万科A"},
             ]
         )
         repository = MySQLStockMasterRepository(lambda: connection)
 
-        total_count, items = repository.list_page(offset=0, limit=2)
+        items = repository.list_all()
 
-        self.assertEqual(total_count, 2)
         self.assertEqual([item.code for item in items], ["000001", "000002"])
-        self.assertIn("COUNT(*) AS total_count", connection.cursors[0].executed[0][0])
-        self.assertIn("ORDER BY code ASC", connection.cursors[1].executed[0][0])
-        self.assertIn("LIMIT %s OFFSET %s", connection.cursors[1].executed[0][0])
-        self.assertEqual(connection.cursors[1].executed[0][1], (2, 0))
+        self.assertIn("SELECT code, name", connection.cursors[0].executed[0][0])
 
     def test_mysql_stock_daily_repository_existing_daily_keys(self):
         from mcp_stock_server.repositories.stock_daily_repository import MySQLStockDailyRepository
@@ -1294,10 +1201,10 @@ class MCPStockServerTests(unittest.TestCase):
         from mcp_stock_server.server import create_mcp_server
 
         class FakeQueryService:
-            def list_stock_codes(self, offset, limit):
+            def list_stock_codes(self):
                 from mcp_stock_server.models.db_models import StockCodeItem
 
-                return (1, [StockCodeItem(code="000001", name="平安银行")])
+                return [StockCodeItem(code="000001", name="平安银行")]
 
         class FakeWriteService:
             pass
@@ -1344,11 +1251,10 @@ class MCPStockServerTests(unittest.TestCase):
         from mcp_stock_server.server import create_mcp_server
 
         class FakeQueryService:
-            def list_stock_codes(self, offset, limit):
-                self.last_call = (offset, limit)
+            def list_stock_codes(self):
                 from mcp_stock_server.models.db_models import StockCodeItem
 
-                return (1, [StockCodeItem(code="000001", name="平安银行")])
+                return [StockCodeItem(code="000001", name="平安银行")]
 
         class FakeWriteService:
             pass
@@ -1365,61 +1271,14 @@ class MCPStockServerTests(unittest.TestCase):
 
                 return decorator
 
-        query_service = FakeQueryService()
         app = create_mcp_server(
-            query_service,
+            FakeQueryService(),
             FakeWriteService(),
             fastmcp_cls=FakeFastMCP,
         )
-        payload = app.registered["list_stock_codes"](0, 100)
+        payload = app.registered["list_stock_codes"]()
 
-        self.assertEqual(query_service.last_call, (0, 100))
-        self.assertEqual(
-            payload,
-            {
-                "total_count": 1,
-                "offset": 0,
-                "limit": 100,
-                "has_more": False,
-                "items": ["000001"],
-                "display_notice": "Showing one page only. Data source is complete.",
-            },
-        )
-
-    def test_registered_tool_uses_default_pagination_values(self):
-        if importlib.util.find_spec("mcp") is None:
-            self.skipTest("mcp package is not installed in the current test environment")
-        from mcp_stock_server.server import create_mcp_server
-
-        class FakeQueryService:
-            def list_stock_codes(self, offset, limit):
-                self.last_call = (offset, limit)
-                return (0, [])
-
-        class FakeWriteService:
-            pass
-
-        class FakeFastMCP:
-            def __init__(self, name):
-                self.name = name
-                self.registered = {}
-
-            def tool(self, name=None, description=None):
-                def decorator(func):
-                    self.registered[name or func.__name__] = func
-                    return func
-
-                return decorator
-
-        query_service = FakeQueryService()
-        app = create_mcp_server(
-            query_service,
-            FakeWriteService(),
-            fastmcp_cls=FakeFastMCP,
-        )
-        app.registered["list_stock_codes"]()
-
-        self.assertEqual(query_service.last_call, (0, 100))
+        self.assertEqual(payload, ["000001"])
 
     def test_registered_indicator_tool_returns_expected_payload(self):
         if importlib.util.find_spec("mcp") is None:

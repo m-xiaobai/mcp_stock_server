@@ -27,11 +27,10 @@ def create_mcp_server(
 
     @app.tool(
         name="list_stock_codes",
-        description="Query stock codes with offset-based pagination.",
+        description="Query all stock codes and names.",
     )
-    def list_stock_codes(offset: int = 0, limit: int = 100) -> dict[str, Any]:
-        payload = {"offset": offset, "limit": limit}
-        return list_stock_codes_tool(stock_master_service, payload)
+    def list_stock_codes() -> list[str]:
+        return list_stock_codes_tool(stock_master_service)
 
     @app.tool(
         name="get_stock_daily_bars",

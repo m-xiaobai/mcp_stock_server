@@ -9,7 +9,7 @@ ConnectionFactory = Callable[[], Any]
 
 
 class StockMasterRepository(Protocol):
-    def list_page(self, offset: int, limit: int) -> tuple[int, list[StockCodeItem]]:
+    def list_all(self) -> list[StockCodeItem]:
         ...
 
     def existing_codes(self, codes: list[str]) -> set[str]:
@@ -23,9 +23,8 @@ class StockMasterRepository(Protocol):
 class InMemoryStockMasterRepository:
     items: list[StockCodeItem]
 
-    def list_page(self, offset: int, limit: int) -> tuple[int, list[StockCodeItem]]:
-        sorted_items = sorted(self.items, key=lambda item: item.code)
-        return len(sorted_items), sorted_items[offset : offset + limit]
+    def list_all(self) -> list[StockCodeItem]:
+        return list(self.items)
 
     def existing_codes(self, codes: list[str]) -> set[str]:
         known = {item.code for item in self.items}
@@ -40,28 +39,17 @@ class InMemoryStockMasterRepository:
 class MySQLStockMasterRepository:
     connection_factory: ConnectionFactory
 
-    def list_page(self, offset: int, limit: int) -> tuple[int, list[StockCodeItem]]:
-        count_sql = """
-SELECT COUNT(*) AS total_count
-FROM stock_master
-""".strip()
-        page_sql = """
+    def list_all(self) -> list[StockCodeItem]:
+        sql = """
 SELECT code, name
 FROM stock_master
 ORDER BY code ASC
-LIMIT %s OFFSET %s
 """.strip()
         connection = self.connection_factory()
         with connection.cursor() as cursor:
-            cursor.execute(count_sql)
-            total_count_row = cursor.fetchall()[0]
-        with connection.cursor() as cursor:
-            cursor.execute(page_sql, (limit, offset))
+            cursor.execute(sql)
             rows = cursor.fetchall()
-        return (
-            int(total_count_row["total_count"]),
-            [StockCodeItem(code=row["code"], name=row["name"]) for row in rows],
-        )
+        return [StockCodeItem(code=row["code"], name=row["name"]) for row in rows]
 
     def existing_codes(self, codes: list[str]) -> set[str]:
         if not codes:
