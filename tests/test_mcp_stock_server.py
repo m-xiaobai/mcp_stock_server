@@ -1,6 +1,7 @@
 import unittest
 import importlib.util
 from datetime import date
+from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -1422,6 +1423,7 @@ class MCPStockServerTests(unittest.TestCase):
                 "compute_multi_trend",
                 "compute_short_trend",
                 "get_stock_daily_bars",
+                "get_technical_snapshot",
                 "insert_stock_daily_bars_after_close",
                 "list_stock_codes",
                 "screen_b1_stocks",
@@ -1860,6 +1862,183 @@ class MCPStockServerTests(unittest.TestCase):
                 "2026-05-26",
                 [],
             )
+
+    def test_get_technical_snapshot_tool_returns_snapshot_and_bars(self):
+        from mcp_stock_server.models.db_models import DailyBar, StockDailyBarsItem
+        from mcp_stock_server.models.response_models import GetStockDailyBarsResponse
+        from mcp_stock_server.tools.stock_tools import get_technical_snapshots_tool
+
+        class FakeStockDailyService:
+            def get_stock_daily_bars(self, time, codes, limit=120):
+                self.last_call = (time, codes, limit)
+                bars = []
+                base_close = Decimal("10.00")
+                for index in range(60):
+                    close = base_close + Decimal(index) * Decimal("0.10")
+                    bars.append(
+                        DailyBar(
+                            code="600000",
+                            trade_date=date(2026, 3, 30) + timedelta(days=index),
+                            open=close - Decimal("0.05"),
+                            close=close,
+                            high=close + Decimal("0.30"),
+                            low=close - Decimal("0.20"),
+                            vol=1000 + index * 10,
+                            amount=Decimal(1000000 + index * 10000),
+                        )
+                    )
+                return GetStockDailyBarsResponse(
+                    time=time,
+                    items=[StockDailyBarsItem(code="600000", daily_bars=bars)],
+                )
+
+        payload = get_technical_snapshots_tool(
+            FakeStockDailyService(),
+            {
+                "symbols": ["600000"],
+                "trade_date": "2026-05-28",
+                "lookback_days": 60,
+                "include_bars": True,
+            },
+        )
+
+        self.assertEqual(payload["trade_date"], "2026-05-28")
+        self.assertEqual(payload["items"][0]["symbol"], "600000")
+        self.assertEqual(payload["items"][0]["bars_count"], 60)
+        self.assertEqual(len(payload["items"][0]["bars"]), 60)
+        self.assertEqual(payload["items"][0]["bars"][-1]["close"], "15.90")
+        self.assertEqual(payload["items"][0]["technical_snapshot"]["data_sufficiency"], "ok")
+        self.assertEqual(payload["items"][0]["technical_snapshot"]["macd_signal"], "bullish_above_zero")
+        self.assertEqual(payload["items"][0]["technical_snapshot"]["rsi_state"], "overbought")
+        self.assertEqual(
+            payload["items"][0]["technical_snapshot"]["volume_price_pattern"],
+            "volume_shrink_price_up",
+        )
+
+    def test_get_technical_snapshots_tool_returns_partial_failures(self):
+        from mcp_stock_server.models.db_models import DailyBar, StockDailyBarsItem
+        from mcp_stock_server.models.response_models import GetStockDailyBarsResponse
+        from mcp_stock_server.tools.stock_tools import get_technical_snapshots_tool
+
+        class FakeStockDailyService:
+            def get_stock_daily_bars(self, time, codes, limit=120):
+                ok_bars = []
+                for index in range(25):
+                    close = Decimal("20.00") + Decimal(index) * Decimal("0.20")
+                    ok_bars.append(
+                        DailyBar(
+                            code="000001",
+                            trade_date=date(2026, 5, 1) + timedelta(days=index),
+                            open=close - Decimal("0.10"),
+                            close=close,
+                            high=close + Decimal("0.30"),
+                            low=close - Decimal("0.20"),
+                            vol=2000 + index * 20,
+                            amount=Decimal(2000000 + index * 20000),
+                        )
+                    )
+                insufficient_bars = ok_bars[:10]
+                return GetStockDailyBarsResponse(
+                    time=time,
+                    items=[
+                        StockDailyBarsItem(code="000001", daily_bars=ok_bars),
+                        StockDailyBarsItem(code="300001", daily_bars=insufficient_bars),
+                        StockDailyBarsItem(code="688001", daily_bars=[]),
+                    ],
+                )
+
+        payload = get_technical_snapshots_tool(
+            FakeStockDailyService(),
+            {
+                "symbols": ["000001", "300001", "688001"],
+                "trade_date": "2026-05-25",
+                "lookback_days": 60,
+                "include_bars": False,
+            },
+        )
+
+        self.assertEqual(payload["trade_date"], "2026-05-25")
+        self.assertEqual([item["symbol"] for item in payload["items"]], ["000001", "300001"])
+        self.assertNotIn("bars", payload["items"][0])
+        self.assertEqual(payload["items"][1]["technical_snapshot"]["data_sufficiency"], "insufficient_history")
+        self.assertEqual(
+            payload["partial_failures"],
+            [{"symbol": "688001", "reason": "insufficient_history"}],
+        )
+
+    def test_registered_technical_snapshot_tools_return_expected_payloads(self):
+        if importlib.util.find_spec("mcp") is None:
+            self.skipTest("mcp package is not installed in the current test environment")
+        from mcp_stock_server.server import create_mcp_server
+
+        class FakeQueryService:
+            def list_stock_codes(self):
+                return []
+
+        class FakeWriteService:
+            def get_stock_daily_bars(self, time, codes, limit=120):
+                bars_by_code = {}
+                for code in codes:
+                    bars = []
+                    total = 60 if code == "600000" else 12
+                    for index in range(total):
+                        close = Decimal("10.00") + Decimal(index) * Decimal("0.10")
+                        bars.append(
+                            type(
+                                "Bar",
+                                (),
+                                {
+                                    "code": code,
+                                    "trade_date": date(2026, 3, 30) + timedelta(days=index),
+                                    "open": close - Decimal("0.05"),
+                                    "close": close,
+                                    "high": close + Decimal("0.30"),
+                                    "low": close - Decimal("0.20"),
+                                    "vol": 1000 + index * 10,
+                                    "amount": Decimal(1000000 + index * 10000),
+                                },
+                            )()
+                        )
+                    bars_by_code[code] = bars
+                return type(
+                    "Response",
+                    (),
+                    {
+                        "time": time,
+                        "items": [
+                            type("Item", (), {"code": code, "daily_bars": bars_by_code[code]})()
+                            for code in codes
+                        ],
+                    },
+                )()
+
+        class FakeFastMCP:
+            def __init__(self, name):
+                self.name = name
+                self.registered = {}
+
+            def tool(self, name=None, description=None):
+                def decorator(func):
+                    self.registered[name or func.__name__] = func
+                    return func
+
+                return decorator
+
+        app = create_mcp_server(
+            FakeQueryService(),
+            FakeWriteService(),
+            fastmcp_cls=FakeFastMCP,
+        )
+
+        batch_payload = app.registered["get_technical_snapshot"](
+            ["600000", "300001"],
+            "2026-05-28",
+            60,
+            False,
+        )
+
+        self.assertIn("get_technical_snapshot", app.registered)
+        self.assertEqual(batch_payload["items"][1]["technical_snapshot"]["data_sufficiency"], "insufficient_history")
 
 
 if __name__ == "__main__":

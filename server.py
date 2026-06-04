@@ -11,6 +11,7 @@ from .tools import (
     compute_kdj_by_code_tool,
     compute_multi_trend_by_code_tool,
     compute_short_trend_by_code_tool,
+    get_technical_snapshots_tool,
     insert_stock_daily_bars_after_close_tool,
     get_stock_daily_bars_tool,
     list_stock_codes_tool,
@@ -130,6 +131,24 @@ def create_mcp_server(
             codes=codes,
             limit=limit,
         )
+
+    @app.tool(
+        name="get_technical_snapshot",
+        description="Build technical snapshots for a batch of stock codes from recent daily bars.",
+    )
+    def get_technical_snapshot(
+        symbols: list[str],
+        trade_date: str,
+        lookback_days: int = 60,
+        include_bars: bool = False,
+    ) -> dict[str, Any]:
+        payload = {
+            "symbols": symbols,
+            "trade_date": trade_date,
+            "lookback_days": lookback_days,
+            "include_bars": include_bars,
+        }
+        return get_technical_snapshots_tool(stock_daily_service, payload)
 
     @app.tool(
         name="screen_b1_stocks",

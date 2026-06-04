@@ -9,6 +9,7 @@ from ..init.init_stock_daily import fetch_today_stock_daily
 from ..init.init_stock_master import fetch_all_stock_codes
 from ..models import UpsertStockDailyBarsRequest
 from ..services import StockDailyService, StockMasterService
+from ..services.technical_snapshot_service import TechnicalSnapshotService
 from .indicator_tools import (
     compute_amplitude_by_code_tool,
     compute_kdj_by_code_tool,
@@ -205,3 +206,15 @@ def insert_stock_daily_bars_after_close_tool(
         "failed": response.failed,
         "errors": [asdict(item) for item in response.errors],
     }
+
+
+def get_technical_snapshots_tool(
+    stock_daily_service: StockDailyService, payload: dict[str, Any]
+) -> dict[str, Any]:
+    service = TechnicalSnapshotService(stock_daily_service)
+    return service.get_technical_snapshots(
+        symbols=[str(symbol).strip() for symbol in payload["symbols"]],
+        trade_date=date.fromisoformat(payload["trade_date"]),
+        lookback_days=int(payload.get("lookback_days", 60)),
+        include_bars=bool(payload.get("include_bars", False)),
+    )
