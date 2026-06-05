@@ -22,6 +22,18 @@ def _safe_null(value: float | None) -> float | None:
     return value
 
 
+def _round_snapshot_value(value: Any) -> Any:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, float):
+        return round(value, 4)
+    if isinstance(value, dict):
+        return {key: _round_snapshot_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_round_snapshot_value(item) for item in value]
+    return value
+
+
 def _ema(values: list[float], period: int) -> list[float]:
     if not values:
         return []
@@ -214,7 +226,7 @@ class TechnicalSnapshotService:
             "weak_close_after_intraday_strength": float(latest.high - latest.close) / float(latest.high - latest.low) > 0.45 if float(latest.high) != float(latest.low) else False,
         }
         snapshot["data_sufficiency"] = _data_sufficiency(bars, high_20d, low_20d, avg_volume_5d)
-        return snapshot
+        return _round_snapshot_value(snapshot)
 
     def get_technical_snapshot(
         self,

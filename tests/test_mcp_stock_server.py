@@ -1914,6 +1914,9 @@ class MCPStockServerTests(unittest.TestCase):
             payload["items"][0]["technical_snapshot"]["volume_price_pattern"],
             "volume_shrink_price_up",
         )
+        for value in payload["items"][0]["technical_snapshot"].values():
+            if isinstance(value, float):
+                self.assertEqual(value, round(value, 4))
 
     def test_get_technical_snapshots_tool_returns_partial_failures(self):
         from mcp_stock_server.models.db_models import DailyBar, StockDailyBarsItem
