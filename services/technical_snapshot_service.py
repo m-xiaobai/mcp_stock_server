@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
@@ -154,6 +155,36 @@ def _data_sufficiency(
 class TechnicalSnapshotService:
     stock_daily_service: StockDailyService
 
+    def _serialize_bars(self, bars: list[DailyBar]) -> list[dict[str, Any]]:
+        return [
+            {
+                "trade_date": bar.trade_date.isoformat(),
+                "open": str(bar.open),
+                "close": str(bar.close),
+                "high": str(bar.high),
+                "low": str(bar.low),
+                "vol": bar.vol,
+                "amount": str(bar.amount),
+            }
+            for bar in bars
+        ]
+
+    def _build_snapshot_payload(
+        self,
+        symbol: str,
+        bars: list[DailyBar],
+        include_bars: bool,
+    ) -> dict[str, Any]:
+        snapshot = self._build_snapshot(bars)
+        payload: dict[str, Any] = {
+            "symbol": symbol,
+            "bars_count": len(bars),
+            "technical_snapshot": snapshot,
+        }
+        if include_bars:
+            payload["bars"] = self._serialize_bars(bars)
+        return payload
+
     def _build_snapshot(self, bars: list[DailyBar]) -> dict[str, Any]:
         closes = [_to_float(bar.close) for bar in bars]
         highs = [_to_float(bar.high) for bar in bars]
@@ -251,18 +282,7 @@ class TechnicalSnapshotService:
             "technical_snapshot": snapshot,
         }
         if include_bars:
-            payload["bars"] = [
-                {
-                    "trade_date": bar.trade_date.isoformat(),
-                    "open": str(bar.open),
-                    "close": str(bar.close),
-                    "high": str(bar.high),
-                    "low": str(bar.low),
-                    "vol": bar.vol,
-                    "amount": str(bar.amount),
-                }
-                for bar in bars
-            ]
+            payload["bars"] = self._serialize_bars(bars)
         return payload
 
     def get_technical_snapshots(
@@ -280,32 +300,23 @@ class TechnicalSnapshotService:
         item_map = {item.code: item for item in response.items}
         items: list[dict[str, Any]] = []
         partial_failures: list[dict[str, Any]] = []
+        ready_items: list[tuple[str, list[DailyBar]]] = []
         for symbol in symbols:
             item = item_map.get(symbol)
             bars = item.daily_bars if item is not None else []
             if not bars:
                 partial_failures.append({"symbol": symbol, "reason": "insufficient_history"})
                 continue
-            snapshot = self._build_snapshot(bars)
-            payload: dict[str, Any] = {
-                "symbol": symbol,
-                "bars_count": len(bars),
-                "technical_snapshot": snapshot,
-            }
-            if include_bars:
-                payload["bars"] = [
-                    {
-                        "trade_date": bar.trade_date.isoformat(),
-                        "open": str(bar.open),
-                        "close": str(bar.close),
-                        "high": str(bar.high),
-                        "low": str(bar.low),
-                        "vol": bar.vol,
-                        "amount": str(bar.amount),
-                    }
-                    for bar in bars
+            ready_items.append((symbol, bars))
+        if ready_items:
+            max_workers = min(32, len(ready_items))
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = [
+                    executor.submit(self._build_snapshot_payload, symbol, bars, include_bars)
+                    for symbol, bars in ready_items
                 ]
-            items.append(payload)
+                for future in futures:
+                    items.append(future.result())
         return {
             "trade_date": trade_date.isoformat(),
             "items": items,

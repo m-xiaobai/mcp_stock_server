@@ -1,5 +1,6 @@
 import unittest
 import importlib.util
+import threading
 from datetime import date
 from datetime import timedelta
 from decimal import Decimal
@@ -1968,6 +1969,64 @@ class MCPStockServerTests(unittest.TestCase):
             payload["partial_failures"],
             [{"symbol": "688001", "reason": "insufficient_history"}],
         )
+
+    def test_get_technical_snapshots_tool_builds_snapshots_concurrently(self):
+        from mcp_stock_server.models.db_models import DailyBar, StockDailyBarsItem
+        from mcp_stock_server.models.response_models import GetStockDailyBarsResponse
+        from mcp_stock_server.services.technical_snapshot_service import TechnicalSnapshotService
+
+        class FakeStockDailyService:
+            def get_stock_daily_bars(self, time, codes, limit=120):
+                items = []
+                for code in codes:
+                    bars = []
+                    for index in range(25):
+                        close = Decimal("10.00") + Decimal(index) * Decimal("0.10")
+                        bars.append(
+                            DailyBar(
+                                code=code,
+                                trade_date=date(2026, 5, 1) + timedelta(days=index),
+                                open=close - Decimal("0.05"),
+                                close=close,
+                                high=close + Decimal("0.20"),
+                                low=close - Decimal("0.20"),
+                                vol=1000 + index * 10,
+                                amount=Decimal(1000000 + index * 10000),
+                            )
+                        )
+                    items.append(StockDailyBarsItem(code=code, daily_bars=bars))
+                return GetStockDailyBarsResponse(time=time, items=items)
+
+        service = TechnicalSnapshotService(FakeStockDailyService())
+        symbols = ["000001", "000002", "000003"]
+        started = threading.Barrier(len(symbols))
+        active_threads: set[str] = set()
+        active_threads_lock = threading.Lock()
+        observed_parallelism = threading.Event()
+        original_build_snapshot = TechnicalSnapshotService._build_snapshot
+
+        def instrumented_build_snapshot(self, bars):
+            with active_threads_lock:
+                active_threads.add(threading.current_thread().name)
+            if started.wait(timeout=1) == 0:
+                observed_parallelism.set()
+            return original_build_snapshot(self, bars)
+
+        TechnicalSnapshotService._build_snapshot = instrumented_build_snapshot
+        try:
+            payload = service.get_technical_snapshots(
+                symbols=symbols,
+                trade_date=date(2026, 5, 25),
+                lookback_days=60,
+                include_bars=False,
+            )
+        finally:
+            TechnicalSnapshotService._build_snapshot = original_build_snapshot
+
+        self.assertTrue(observed_parallelism.is_set())
+        self.assertGreater(len(active_threads), 1)
+        self.assertEqual([item["symbol"] for item in payload["items"]], symbols)
+        self.assertEqual(payload["partial_failures"], [])
 
     def test_registered_technical_snapshot_tools_return_expected_payloads(self):
         if importlib.util.find_spec("mcp") is None:
