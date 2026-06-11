@@ -180,7 +180,7 @@ class MCPStockServerTests(unittest.TestCase):
         self.assertEqual(payload["items"][0]["code"], "600000")
         self.assertEqual(payload["items"][0]["daily_bars"][0]["close"], "10.50")
 
-    def test_screen_b1_stocks_tool_returns_only_selected_codes(self):
+    def test_screen_b1_stocks_tool_returns_selected_code_with_name_defaulting_to_none(self):
         from mcp_stock_server.tools.stock_tools import screen_b1_stocks_tool
 
         class FakeStockMasterService:
@@ -260,7 +260,7 @@ class MCPStockServerTests(unittest.TestCase):
         self.assertEqual(payload["time"], "2026-05-26")
         self.assertEqual(payload["total_candidates"], 3)
         self.assertEqual(payload["selected_count"], 1)
-        self.assertEqual(payload["items"], ["000001"])
+        self.assertEqual(payload["items"], [{"code": "000001", "name": None}])
 
     def test_screen_b1_stocks_tool_short_circuits_when_first_step_empty(self):
         from mcp_stock_server.tools.stock_tools import screen_b1_stocks_tool
@@ -358,7 +358,7 @@ class MCPStockServerTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(payload["items"], ["000001"])
+        self.assertEqual(payload["items"], [{"code": "000001", "name": "平安银行"}])
         self.assertEqual(observed_codes, [["000001", "000002"]])
         self.assertEqual(payload["total_candidates"], 2)
         self.assertEqual(payload["selected_count"], 1)
@@ -1541,6 +1541,7 @@ class MCPStockServerTests(unittest.TestCase):
         self.assertEqual(payload["time"], "2026-05-26")
         self.assertIn("selected_count", payload)
         self.assertIn("items", payload)
+        self.assertEqual(payload["items"], [{"code": "000001", "name": "平安银行"}])
 
     def test_registered_indicator_tool_returns_expected_payload(self):
         if importlib.util.find_spec("mcp") is None:

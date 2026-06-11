@@ -61,10 +61,18 @@ def screen_b1_stocks_tool(
     get_bars_fn=get_stock_daily_bars_tool,
 ) -> dict[str, Any]:
     time = payload["time"]
-    candidate_codes = [
-        item.code if hasattr(item, "code") else str(item)
-        for item in stock_master_service.list_stock_codes()
-    ]
+    stock_code_items = stock_master_service.list_stock_codes()
+    code_name_map: dict[str, str | None] = {}
+    candidate_codes: list[str] = []
+    for item in stock_code_items:
+        if hasattr(item, "code"):
+            code = str(item.code)
+            name = getattr(item, "name", None)
+            code_name_map[code] = str(name) if name is not None else None
+        else:
+            code = str(item)
+            code_name_map[code] = None
+        candidate_codes.append(code)
     total_candidates = len(candidate_codes)
     if not candidate_codes:
         return {
@@ -167,7 +175,10 @@ def screen_b1_stocks_tool(
         "time": time,
         "total_candidates": total_candidates,
         "selected_count": len(selected_codes),
-        "items": selected_codes,
+        "items": [
+            {"code": code, "name": code_name_map.get(code)}
+            for code in selected_codes
+        ],
     }
 
 
