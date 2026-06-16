@@ -11,6 +11,7 @@ venv/
 .ruff_cache/
 
 *.log
+docs/audit/
 
 config.json
 config.local.json

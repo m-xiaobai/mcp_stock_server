@@ -1380,7 +1380,7 @@ class MCPStockServerTests(unittest.TestCase):
         self.assertIsInstance(stock_daily_service.stock_master_repository, MySQLStockMasterRepository)
         self.assertIsInstance(stock_daily_service.stock_daily_repository, MySQLStockDailyRepository)
 
-    def test_create_mcp_server_registers_three_tools(self):
+    def test_create_mcp_server_registers_expected_tools(self):
         if importlib.util.find_spec("mcp") is None:
             self.skipTest("mcp package is not installed in the current test environment")
         from mcp_stock_server.server import create_mcp_server
@@ -1423,6 +1423,7 @@ class MCPStockServerTests(unittest.TestCase):
                 "compute_kdj",
                 "compute_multi_trend",
                 "compute_short_trend",
+                "get_capability_manifest",
                 "get_stock_daily_bars",
                 "get_technical_snapshot",
                 "insert_stock_daily_bars_after_close",

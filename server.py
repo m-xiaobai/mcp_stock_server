@@ -1,23 +1,22 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
+from .audit.writer import JsonlAuditWriter
+from .auth.approval import InMemoryApprovalChecker
+from .auth.context import build_development_auth_context
+from .governance.policy import PolicyEngine
+from .governance.redaction import Redactor
+from .manifest.capabilities import build_capability_manifest
+from .protocol.dispatcher import ToolDispatcher
+from .protocol.errors import ToolDispatchError
+from .protocol.response import error_response
 from .services import StockDailyService, StockMasterService
-from .tools import (
-    compute_amplitude_by_code_tool,
-    compute_kdj_by_code_tool,
-    compute_multi_trend_by_code_tool,
-    compute_short_trend_by_code_tool,
-    get_technical_snapshots_tool,
-    insert_stock_daily_bars_after_close_tool,
-    get_stock_daily_bars_tool,
-    list_stock_codes_tool,
-    screen_b1_stocks_tool,
-    upsert_stock_daily_bars_tool,
-)
+from .tooling.stock_tools import build_stock_tool_registry
 
 
 def create_mcp_server(
@@ -26,115 +25,132 @@ def create_mcp_server(
     fastmcp_cls: type[Any] = FastMCP,
 ):
     app = fastmcp_cls("mcp-stock-server")
-
-    @app.tool(
-        name="list_stock_codes",
-        description="Query all stock codes and names.",
+    registry = build_stock_tool_registry(stock_master_service, stock_daily_service)
+    dispatcher = ToolDispatcher(
+        registry=registry,
+        policy_engine=PolicyEngine(approval_checker=InMemoryApprovalChecker()),
+        audit_writer=JsonlAuditWriter(Path(__file__).with_name("docs") / "audit" / "mcp-audit.jsonl"),
+        redactor=Redactor(),
     )
-    def list_stock_codes() -> list[str]:
-        return list_stock_codes_tool(stock_master_service)
+
+    def dispatch_tool(name: str, args: dict[str, Any]) -> Any:
+        try:
+            return dispatcher.dispatch(
+                name=name,
+                args=args,
+                context=build_development_auth_context(registry.list_tools()),
+            )
+        except ToolDispatchError as exc:
+            return error_response(exc.code, exc.message)
+
+    definitions = {definition.name: definition for definition in registry.list_tools()}
+
+    # @app.tool(
+    #     name="list_stock_codes",
+    #     description=definitions["list_stock_codes"].description,
+    # )
+    # def list_stock_codes() -> list[str]:
+    #     return dispatch_tool("list_stock_codes", {})
 
     @app.tool(
         name="get_stock_daily_bars",
-        description="Query recent 120 trading-day bars by stock codes.",
+        description=definitions["get_stock_daily_bars"].description,
     )
     def get_stock_daily_bars(time: str, codes: list[str]) -> dict[str, Any]:
-        payload = {"time": time, "codes": codes}
-        return get_stock_daily_bars_tool(stock_daily_service, payload)
+        return dispatch_tool("get_stock_daily_bars", {"time": time, "codes": codes})
 
     @app.tool(
         name="upsert_stock_daily_bars",
-        description="Insert or update stock daily bars after market close.",
+        description=definitions["upsert_stock_daily_bars"].description,
     )
     def upsert_stock_daily_bars(time: str, daily_data: list[dict[str, Any]]) -> dict[str, Any]:
-        payload = {"time": time, "daily_data": daily_data}
-        return upsert_stock_daily_bars_tool(stock_daily_service, payload)
+        return dispatch_tool("upsert_stock_daily_bars", {"time": time, "daily_data": daily_data})
 
     @app.tool(
         name="insert_stock_daily_bars_after_close",
-        description="Insert stock daily bars after market close.",
+        description=definitions["insert_stock_daily_bars_after_close"].description,
     )
     def insert_stock_daily_bars_after_close(time: str) -> dict[str, Any]:
-        payload = {"time": time}
-        return insert_stock_daily_bars_after_close_tool(stock_daily_service, payload)
+        return dispatch_tool("insert_stock_daily_bars_after_close", {"time": time})
 
-    @app.tool(
-        name="compute_short_trend",
-        description="Load recent bars by stock code and compute Tongdaxin short trend EMA(EMA(C,10),10).",
-    )
-    def compute_short_trend(
-        time: str,
-        codes: list[str],
-        period: int = 10,
-        limit: int = 120,
-    ) -> dict[str, Any]:
-        return compute_short_trend_by_code_tool(
-            stock_daily_service=stock_daily_service,
-            time=time,
-            codes=codes,
-            period=period,
-            limit=limit,
-        )
+    # @app.tool(
+    #     name="compute_short_trend",
+    #     description=definitions["compute_short_trend"].description,
+    # )
+    # def compute_short_trend(
+    #     time: str,
+    #     codes: list[str],
+    #     period: int = 10,
+    #     limit: int = 120,
+    # ) -> dict[str, Any]:
+    #     return dispatch_tool(
+    #         "compute_short_trend",
+    #         {
+    #             "time": time,
+    #             "codes": codes,
+    #             "period": period,
+    #             "limit": limit,
+    #         },
+    #     )
 
-    @app.tool(
-        name="compute_multi_trend",
-        description="Load recent bars by stock code and compute Tongdaxin multi-trend baseline.",
-    )
-    def compute_multi_trend(
-        time: str,
-        codes: list[str],
-        periods: list[int] | None = None,
-        limit: int = 120,
-    ) -> dict[str, Any]:
-        return compute_multi_trend_by_code_tool(
-            stock_daily_service=stock_daily_service,
-            time=time,
-            codes=codes,
-            periods=periods,
-            limit=limit,
-        )
+    # @app.tool(
+    #     name="compute_multi_trend",
+    #     description=definitions["compute_multi_trend"].description,
+    # )
+    # def compute_multi_trend(
+    #     time: str,
+    #     codes: list[str],
+    #     periods: list[int] | None = None,
+    #     limit: int = 120,
+    # ) -> dict[str, Any]:
+    #     return dispatch_tool(
+    #         "compute_multi_trend",
+    #         {
+    #             "time": time,
+    #             "codes": codes,
+    #             "periods": periods,
+    #             "limit": limit,
+    #         },
+    #     )
 
-    @app.tool(
-        name="compute_kdj",
-        description="Load recent bars by stock code and compute Tongdaxin KDJ indicator.",
-    )
-    def compute_kdj(
-        time: str,
-        codes: list[str],
-        period: int = 9,
-        smooth_k: int = 3,
-        smooth_d: int = 3,
-        limit: int = 120,
-    ) -> dict[str, Any]:
-        return compute_kdj_by_code_tool(
-            stock_daily_service=stock_daily_service,
-            time=time,
-            codes=codes,
-            period=period,
-            smooth_k=smooth_k,
-            smooth_d=smooth_d,
-            limit=limit,
-        )
+    # @app.tool(
+    #     name="compute_kdj",
+    #     description=definitions["compute_kdj"].description,
+    # )
+    # def compute_kdj(
+    #     time: str,
+    #     codes: list[str],
+    #     period: int = 9,
+    #     smooth_k: int = 3,
+    #     smooth_d: int = 3,
+    #     limit: int = 120,
+    # ) -> dict[str, Any]:
+    #     return dispatch_tool(
+    #         "compute_kdj",
+    #         {
+    #             "time": time,
+    #             "codes": codes,
+    #             "period": period,
+    #             "smooth_k": smooth_k,
+    #             "smooth_d": smooth_d,
+    #             "limit": limit,
+    #         },
+    #     )
 
-    @app.tool(
-        name="compute_amplitude",
-        description="Load recent bars by stock code and compute today's B1 amplitude value.",
-    )
-    def compute_amplitude(
-        time: str,
-        codes: list[str],
-        limit: int = 120,
-    ) -> dict[str, Any]:
-        return compute_amplitude_by_code_tool(
-            stock_daily_service=stock_daily_service,
-            time=time,
-            codes=codes,
-            limit=limit,
-        )
+    # @app.tool(
+    #     name="compute_amplitude",
+    #     description=definitions["compute_amplitude"].description,
+    # )
+    # def compute_amplitude(
+    #     time: str,
+    #     codes: list[str],
+    #     limit: int = 120,
+    # ) -> dict[str, Any]:
+    #     return dispatch_tool("compute_amplitude", {"time": time, "codes": codes, "limit": limit})
 
     @app.tool(
         name="get_technical_snapshot",
-        description="Build technical snapshots for a batch of stock codes from recent daily bars.",
+        description=definitions["get_technical_snapshot"].description,
     )
     def get_technical_snapshot(
         symbols: list[str],
@@ -142,25 +158,37 @@ def create_mcp_server(
         lookback_days: int = 60,
         include_bars: bool = False,
     ) -> dict[str, Any]:
-        payload = {
-            "symbols": symbols,
-            "trade_date": trade_date,
-            "lookback_days": lookback_days,
-            "include_bars": include_bars,
-        }
-        return get_technical_snapshots_tool(stock_daily_service, payload)
+        return dispatch_tool(
+            "get_technical_snapshot",
+            {
+                "symbols": symbols,
+                "trade_date": trade_date,
+                "lookback_days": lookback_days,
+                "include_bars": include_bars,
+            },
+        )
+
+    @app.tool(
+        name="get_capability_manifest",
+        description="Return the machine-readable capability manifest for this MCP server.",
+    )
+    def get_capability_manifest() -> dict[str, Any]:
+        return app.capability_manifest
 
     @app.tool(
         name="screen_b1_stocks",
-        description="Authoritative B1 stock screener: short trend > multi-trend, close > multi-trend, J < 20, amplitude < 7%. Returns stock codes and names that pass all B1 conditions.",
+        description=definitions["screen_b1_stocks"].description,
     )
     def screen_b1_stocks(time: str) -> dict[str, Any]:
-        payload = {"time": time}
-        return screen_b1_stocks_tool(
-            stock_master_service=stock_master_service,
-            stock_daily_service=stock_daily_service,
-            payload=payload,
-        )
+        return dispatch_tool("screen_b1_stocks", {"time": time})
+
+    app.tool_registry = registry
+    app.capability_manifest = build_capability_manifest(
+        registry=registry,
+        server_name="mcp-stock-server",
+        version="1.0.0",
+        transport="stdio",
+    )
 
     return app
 
