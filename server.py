@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 from typing import Any
@@ -19,17 +20,52 @@ from .services import StockDailyService, StockMasterService
 from .tooling.stock_tools import build_stock_tool_registry
 
 
+logger = logging.getLogger(__name__)
+
+
+def _build_fastmcp_app(
+    fastmcp_cls: type[Any],
+    *,
+    name: str,
+    host: str,
+    port: int,
+    streamable_http_path: str,
+):
+    try:
+        return fastmcp_cls(
+            name,
+            host=host,
+            port=port,
+            streamable_http_path=streamable_http_path,
+        )
+    except TypeError:
+        return fastmcp_cls(name)
+
+
 def create_mcp_server(
     stock_master_service: StockMasterService,
     stock_daily_service: StockDailyService,
     fastmcp_cls: type[Any] = FastMCP,
+    *,
+    transport: str = "stdio",
+    host: str = "127.0.0.1",
+    port: int = 8000,
+    streamable_http_path: str = "/mcp",
 ):
-    app = fastmcp_cls("mcp-stock-server")
+    app = _build_fastmcp_app(
+        fastmcp_cls,
+        name="mcp-stock-server",
+        host=host,
+        port=port,
+        streamable_http_path=streamable_http_path,
+    )
     registry = build_stock_tool_registry(stock_master_service, stock_daily_service)
     dispatcher = ToolDispatcher(
         registry=registry,
         policy_engine=PolicyEngine(approval_checker=InMemoryApprovalChecker()),
-        audit_writer=JsonlAuditWriter(Path(__file__).with_name("docs") / "audit" / "mcp-audit.jsonl"),
+        audit_writer=JsonlAuditWriter(
+            Path(__file__).with_name("docs") / "audit" / f"mcp-audit-{transport}.jsonl"
+        ),
         redactor=Redactor(),
     )
 
@@ -187,7 +223,7 @@ def create_mcp_server(
         registry=registry,
         server_name="mcp-stock-server",
         version="1.0.0",
-        transport="stdio",
+        transport=transport,
     )
 
     return app
@@ -202,6 +238,34 @@ def run_stdio_server(
         stock_master_service=stock_master_service,
         stock_daily_service=stock_daily_service,
         fastmcp_cls=fastmcp_cls,
+        transport="stdio",
     )
-    print("mcp-stock-server ready on stdio", file=sys.stderr, flush=True)
-    app.run()
+    logger.info("mcp-stock-server ready on stdio")
+    app.run(transport="stdio")
+
+
+def run_streamable_http_server(
+    stock_master_service: StockMasterService,
+    stock_daily_service: StockDailyService,
+    fastmcp_cls: type[Any] = FastMCP,
+    *,
+    host: str = "127.0.0.1",
+    port: int = 8000,
+    streamable_http_path: str = "/mcp",
+) -> None:
+    app = create_mcp_server(
+        stock_master_service=stock_master_service,
+        stock_daily_service=stock_daily_service,
+        fastmcp_cls=fastmcp_cls,
+        transport="streamable-http",
+        host=host,
+        port=port,
+        streamable_http_path=streamable_http_path,
+    )
+    logger.info(
+        "mcp-stock-server ready on streamable-http http://%s:%s%s",
+        host,
+        port,
+        streamable_http_path,
+    )
+    app.run(transport="streamable-http")

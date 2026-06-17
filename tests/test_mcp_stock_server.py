@@ -1,6 +1,7 @@
 import unittest
 import importlib.util
 import threading
+from dataclasses import dataclass
 from datetime import date
 from datetime import timedelta
 from decimal import Decimal
@@ -9,6 +10,43 @@ from tempfile import TemporaryDirectory
 
 
 class MCPStockServerTests(unittest.TestCase):
+    def test_mcp_runtime_config_defaults_when_mcp_section_missing(self):
+        from mcp_stock_server.main import MCPRuntimeConfig
+
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "config.json"
+            path.write_text(
+                '{"mysql":{"host":"127.0.0.1","port":3306,"user":"u","password":"p","database":"stocks"}}',
+                encoding="utf-8",
+            )
+
+            config = MCPRuntimeConfig.from_file(path)
+
+        self.assertEqual(config.transport, "stdio")
+        self.assertEqual(config.host, "127.0.0.1")
+        self.assertEqual(config.port, 8000)
+        self.assertEqual(config.streamable_http_path, "/mcp")
+
+    def test_mcp_runtime_config_loads_http_settings_from_file(self):
+        from mcp_stock_server.main import MCPRuntimeConfig
+
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "config.json"
+            path.write_text(
+                (
+                    '{"mysql":{"host":"127.0.0.1","port":3306,"user":"u","password":"p","database":"stocks"},'
+                    '"mcp":{"transport":"streamable-http","host":"127.0.0.1","port":9001,"streamable_http_path":"/stocks-mcp"}}'
+                ),
+                encoding="utf-8",
+            )
+
+            config = MCPRuntimeConfig.from_file(path)
+
+        self.assertEqual(config.transport, "streamable-http")
+        self.assertEqual(config.host, "127.0.0.1")
+        self.assertEqual(config.port, 9001)
+        self.assertEqual(config.streamable_http_path, "/stocks-mcp")
+
     def test_upsert_request_rejects_mismatched_trade_date(self):
         from mcp_stock_server.models.request_models import UpsertStockDailyBarsRequest
 
@@ -1433,6 +1471,87 @@ class MCPStockServerTests(unittest.TestCase):
             ],
         )
 
+    def test_create_mcp_server_manifest_defaults_to_stdio_transport(self):
+        if importlib.util.find_spec("mcp") is None:
+            self.skipTest("mcp package is not installed in the current test environment")
+        from mcp_stock_server.server import create_mcp_server
+
+        class FakeQueryService:
+            def list_stock_codes(self):
+                return []
+
+        class FakeWriteService:
+            def get_stock_daily_bars(self, time, codes, limit=120):
+                return type("Response", (), {"time": time, "items": []})()
+
+            def upsert_stock_daily_bars(self, request):
+                return type(
+                    "Response",
+                    (),
+                    {"time": request.time, "total": 0, "success": 0, "failed": 0, "errors": []},
+                )()
+
+        class FakeFastMCP:
+            def __init__(self, name):
+                self.name = name
+                self.registered = {}
+
+            def tool(self, name=None, description=None):
+                def decorator(func):
+                    self.registered[name or func.__name__] = func
+                    return func
+
+                return decorator
+
+        app = create_mcp_server(
+            FakeQueryService(),
+            FakeWriteService(),
+            fastmcp_cls=FakeFastMCP,
+        )
+
+        self.assertEqual(app.capability_manifest["transport"], "stdio")
+
+    def test_create_mcp_server_manifest_uses_http_transport_when_configured(self):
+        if importlib.util.find_spec("mcp") is None:
+            self.skipTest("mcp package is not installed in the current test environment")
+        from mcp_stock_server.server import create_mcp_server
+
+        class FakeQueryService:
+            def list_stock_codes(self):
+                return []
+
+        class FakeWriteService:
+            def get_stock_daily_bars(self, time, codes, limit=120):
+                return type("Response", (), {"time": time, "items": []})()
+
+            def upsert_stock_daily_bars(self, request):
+                return type(
+                    "Response",
+                    (),
+                    {"time": request.time, "total": 0, "success": 0, "failed": 0, "errors": []},
+                )()
+
+        class FakeFastMCP:
+            def __init__(self, name):
+                self.name = name
+                self.registered = {}
+
+            def tool(self, name=None, description=None):
+                def decorator(func):
+                    self.registered[name or func.__name__] = func
+                    return func
+
+                return decorator
+
+        app = create_mcp_server(
+            FakeQueryService(),
+            FakeWriteService(),
+            fastmcp_cls=FakeFastMCP,
+            transport="streamable-http",
+        )
+
+        self.assertEqual(app.capability_manifest["transport"], "streamable-http")
+
     def test_registered_tool_returns_expected_payload(self):
         if importlib.util.find_spec("mcp") is None:
             self.skipTest("mcp package is not installed in the current test environment")
@@ -2103,6 +2222,50 @@ class MCPStockServerTests(unittest.TestCase):
 
         self.assertIn("get_technical_snapshot", app.registered)
         self.assertEqual(batch_payload["items"][1]["technical_snapshot"]["data_sufficiency"], "insufficient_history")
+
+    def test_run_streamable_http_server_uses_http_transport(self):
+        if importlib.util.find_spec("mcp") is None:
+            self.skipTest("mcp package is not installed in the current test environment")
+        from mcp_stock_server.server import run_streamable_http_server
+
+        @dataclass
+        class FakeQueryService:
+            pass
+
+        @dataclass
+        class FakeWriteService:
+            pass
+
+        class FakeFastMCP:
+            def __init__(self, name):
+                self.name = name
+                self.registered = {}
+                self.run_calls = []
+
+            def tool(self, name=None, description=None):
+                def decorator(func):
+                    self.registered[name or func.__name__] = func
+                    return func
+
+                return decorator
+
+            def run(self, transport="stdio"):
+                self.run_calls.append(transport)
+
+        app_holder = {}
+
+        def fake_factory(name):
+            app = FakeFastMCP(name)
+            app_holder["app"] = app
+            return app
+
+        run_streamable_http_server(
+            FakeQueryService(),
+            FakeWriteService(),
+            fastmcp_cls=fake_factory,
+        )
+
+        self.assertEqual(app_holder["app"].run_calls, ["streamable-http"])
 
 
 if __name__ == "__main__":

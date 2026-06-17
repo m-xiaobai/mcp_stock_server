@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import json
+import logging
+import sys
 from pathlib import Path
+from dataclasses import dataclass
 from typing import Callable
 
 if __package__ in (None, ""):
@@ -32,6 +36,29 @@ else:
         MySQLStockMasterRepository,
     )
     from .services import StockDailyService, StockMasterService
+
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(slots=True)
+class MCPRuntimeConfig:
+    transport: str = "stdio"
+    host: str = "127.0.0.1"
+    port: int = 8000
+    streamable_http_path: str = "/mcp"
+
+    @classmethod
+    def from_file(cls, path: str | Path) -> "MCPRuntimeConfig":
+        config_path = Path(path)
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+        mcp_payload = payload.get("mcp", {})
+        return cls(
+            transport=str(mcp_payload.get("transport", "stdio")),
+            host=str(mcp_payload.get("host", "127.0.0.1")),
+            port=int(mcp_payload.get("port", 8000)),
+            streamable_http_path=str(mcp_payload.get("streamable_http_path", "/mcp")),
+        )
 
 
 def build_demo_services() -> tuple[StockMasterService, StockDailyService]:
@@ -70,11 +97,29 @@ def build_mysql_services(
 
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        stream=sys.stderr,
+    )
     if __package__ in (None, ""):
-        from mcp_stock_server.server import run_stdio_server
+        from mcp_stock_server.server import run_stdio_server, run_streamable_http_server
     else:
-        from .server import run_stdio_server
-    print("Starting MCP Stock Server...")
+        from .server import run_stdio_server, run_streamable_http_server
+    logger.info("Starting MCP Stock Server")
     stock_master_service, stock_daily_service = build_mysql_services()
-    run_stdio_server(stock_master_service, stock_daily_service)
-    print("MCP Stock Server running...")
+    runtime_config = MCPRuntimeConfig.from_file(Path(__file__).with_name("config.json"))
+    transport = runtime_config.transport
+    if len(sys.argv) > 1:
+        transport = sys.argv[1]
+    if transport == "streamable-http":
+        run_streamable_http_server(
+            stock_master_service,
+            stock_daily_service,
+            host=runtime_config.host,
+            port=runtime_config.port,
+            streamable_http_path=runtime_config.streamable_http_path,
+        )
+    else:
+        run_stdio_server(stock_master_service, stock_daily_service)
+    logger.info("MCP Stock Server running")
