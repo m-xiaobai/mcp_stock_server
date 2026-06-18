@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
+from mcp.server.auth.provider import AccessToken
+
 if TYPE_CHECKING:
     from ..tooling.definitions import ToolDefinition
 
@@ -30,4 +32,19 @@ def build_development_auth_context(tool_definitions: list["ToolDefinition"]) -> 
         scopes=scopes,
         approval_grants=approval_grants,
         request_id=f"dev-{uuid4().hex}",
+    )
+
+
+def build_authenticated_auth_context(
+    access_token: AccessToken,
+    *,
+    request_id: str,
+    tenant_id: str = "default",
+) -> AuthContext:
+    return AuthContext(
+        user_id=access_token.client_id,
+        tenant_id=tenant_id,
+        scopes=set(access_token.scopes),
+        approval_grants=set(),
+        request_id=request_id,
     )

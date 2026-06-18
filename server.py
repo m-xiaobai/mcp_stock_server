@@ -6,10 +6,12 @@ from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.auth.middleware.auth_context import get_access_token
 
 from .audit.writer import JsonlAuditWriter
 from .auth.approval import InMemoryApprovalChecker
 from .auth.context import build_development_auth_context
+from .auth.oauth import MCPAuthConfig, build_token_verifier
 from .governance.policy import PolicyEngine
 from .governance.redaction import Redactor
 from .manifest.capabilities import build_capability_manifest
@@ -27,16 +29,32 @@ def _build_fastmcp_app(
     fastmcp_cls: type[Any],
     *,
     name: str,
+    transport: str,
     host: str,
     port: int,
     streamable_http_path: str,
+    auth_config: MCPAuthConfig | None = None,
 ):
+    kwargs: dict[str, Any] = {}
+    if transport == "streamable-http" and auth_config and auth_config.enabled:
+        from mcp.server.auth.settings import AuthSettings
+
+        kwargs["auth"] = AuthSettings(
+            issuer_url=auth_config.issuer_url,
+            required_scopes=auth_config.required_scopes,
+            resource_server_url=auth_config.resource_server_url,
+        )
+        token_verifier = build_token_verifier(auth_config)
+        if token_verifier is not None:
+            kwargs["token_verifier"] = token_verifier
+
     try:
         return fastmcp_cls(
             name,
             host=host,
             port=port,
             streamable_http_path=streamable_http_path,
+            **kwargs,
         )
     except TypeError:
         return fastmcp_cls(name)
@@ -51,13 +69,16 @@ def create_mcp_server(
     host: str = "127.0.0.1",
     port: int = 8000,
     streamable_http_path: str = "/mcp",
+    auth_config: MCPAuthConfig | None = None,
 ):
     app = _build_fastmcp_app(
         fastmcp_cls,
         name="mcp-stock-server",
+        transport=transport,
         host=host,
         port=port,
         streamable_http_path=streamable_http_path,
+        auth_config=auth_config,
     )
     registry = build_stock_tool_registry(stock_master_service, stock_daily_service)
     dispatcher = ToolDispatcher(
@@ -71,6 +92,10 @@ def create_mcp_server(
 
     def dispatch_tool(name: str, args: dict[str, Any]) -> Any:
         try:
+            if transport == "streamable-http" and auth_config and auth_config.enabled:
+                # Trigger FastMCP auth context resolution; tool authorization still uses
+                # the existing development-style AuthContext after entry auth succeeds.
+                get_access_token()
             return dispatcher.dispatch(
                 name=name,
                 args=args,
@@ -252,6 +277,7 @@ def run_streamable_http_server(
     host: str = "127.0.0.1",
     port: int = 8000,
     streamable_http_path: str = "/mcp",
+    auth_config: MCPAuthConfig | None = None,
 ) -> None:
     app = create_mcp_server(
         stock_master_service=stock_master_service,
@@ -261,6 +287,7 @@ def run_streamable_http_server(
         host=host,
         port=port,
         streamable_http_path=streamable_http_path,
+        auth_config=auth_config,
     )
     logger.info(
         "mcp-stock-server ready on streamable-http http://%s:%s%s",

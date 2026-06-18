@@ -4,7 +4,7 @@ import json
 import logging
 import sys
 from pathlib import Path
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable
 
 if __package__ in (None, ""):
@@ -15,6 +15,7 @@ if __package__ in (None, ""):
     if str(PROJECT_ROOT) not in sys.path:
         sys.path.insert(0, str(PROJECT_ROOT))
 
+    from mcp_stock_server.auth.oauth import MCPAuthConfig
     from mcp_stock_server.db import MySQLConfig, create_pymysql_connection
     from mcp_stock_server.repositories.stock_daily_repository import (
         InMemoryStockDailyRepository,
@@ -26,6 +27,7 @@ if __package__ in (None, ""):
     )
     from mcp_stock_server.services import StockDailyService, StockMasterService
 else:
+    from .auth.oauth import MCPAuthConfig
     from .db import MySQLConfig, create_pymysql_connection
     from .repositories.stock_daily_repository import (
         InMemoryStockDailyRepository,
@@ -47,17 +49,34 @@ class MCPRuntimeConfig:
     host: str = "127.0.0.1"
     port: int = 8000
     streamable_http_path: str = "/mcp"
+    auth: MCPAuthConfig = field(default_factory=MCPAuthConfig)
 
     @classmethod
     def from_file(cls, path: str | Path) -> "MCPRuntimeConfig":
         config_path = Path(path)
         payload = json.loads(config_path.read_text(encoding="utf-8"))
         mcp_payload = payload.get("mcp", {})
+        auth_payload = mcp_payload.get("auth", {})
         return cls(
             transport=str(mcp_payload.get("transport", "stdio")),
             host=str(mcp_payload.get("host", "127.0.0.1")),
             port=int(mcp_payload.get("port", 8000)),
             streamable_http_path=str(mcp_payload.get("streamable_http_path", "/mcp")),
+            auth=MCPAuthConfig(
+                enabled=bool(auth_payload.get("enabled", False)),
+                mode=auth_payload.get("mode"),
+                verification=auth_payload.get("verification"),
+                issuer_url=auth_payload.get("issuer_url"),
+                resource_server_url=auth_payload.get("resource_server_url"),
+                audience=auth_payload.get("audience"),
+                jwks_uri=auth_payload.get("jwks_uri"),
+                introspection_endpoint=auth_payload.get("introspection_endpoint"),
+                client_id=auth_payload.get("client_id"),
+                client_secret=auth_payload.get("client_secret"),
+                required_scopes=list(auth_payload.get("required_scopes", [])),
+                clock_skew_seconds=int(auth_payload.get("clock_skew_seconds", 60)),
+                cache_ttl_seconds=int(auth_payload.get("cache_ttl_seconds", 300)),
+            ),
         )
 
 
@@ -119,6 +138,7 @@ if __name__ == "__main__":
             host=runtime_config.host,
             port=runtime_config.port,
             streamable_http_path=runtime_config.streamable_http_path,
+            auth_config=runtime_config.auth,
         )
     else:
         run_stdio_server(stock_master_service, stock_daily_service)

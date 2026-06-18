@@ -10,6 +10,19 @@
     "transport": "streamable-http",
     "host": "127.0.0.1",
     "port": 8000,
-    "streamable_http_path": "/mcp"
+    "streamable_http_path": "/mcp",
+      "auth": {
+      "enabled": true,
+      "mode": "resource-server",
+      "verification": "introspection",
+      "issuer_url": "http://localhost:8080/realms/master",
+      "resource_server_url": "http://127.0.0.1:8000/mcp",
+      "introspection_endpoint": "http://localhost:8080/realms/master/protocol/openid-connect/token/introspect",
+      "client_id": "test-mcp-auth",
+      "client_secret": "J5qQIf8nlIDWP5ecE6Ah4NfBMDgiskAB",
+      "required_scopes": ["mcp:tools"],
+      "clock_skew_seconds": 60,
+      "cache_ttl_seconds": 60
+    }
   }
 }

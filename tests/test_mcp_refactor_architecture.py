@@ -4,9 +4,207 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 
 class MCPRefactorArchitectureTests(unittest.TestCase):
+    def test_mcp_runtime_config_parses_disabled_auth_defaults(self):
+        from mcp_stock_server.main import MCPRuntimeConfig
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "mysql": {
+                            "host": "127.0.0.1",
+                            "port": 3306,
+                            "user": "u",
+                            "password": "p",
+                            "database": "stocks",
+                        },
+                        "mcp": {
+                            "transport": "streamable-http",
+                            "auth": {"enabled": False},
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            runtime_config = MCPRuntimeConfig.from_file(config_path)
+
+        self.assertFalse(runtime_config.auth.enabled)
+        self.assertIsNone(runtime_config.auth.verification)
+
+    def test_mcp_runtime_config_parses_jwt_jwks_auth(self):
+        from mcp_stock_server.main import MCPRuntimeConfig
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "mysql": {
+                            "host": "127.0.0.1",
+                            "port": 3306,
+                            "user": "u",
+                            "password": "p",
+                            "database": "stocks",
+                        },
+                        "mcp": {
+                            "transport": "streamable-http",
+                            "auth": {
+                                "enabled": True,
+                                "mode": "resource-server",
+                                "verification": "jwt-jwks",
+                                "issuer_url": "https://issuer.example.com",
+                                "resource_server_url": "https://api.example.com/mcp",
+                                "audience": "mcp-stock-server",
+                                "jwks_uri": "https://issuer.example.com/.well-known/jwks.json",
+                                "required_scopes": ["stock:daily:read"],
+                            },
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            runtime_config = MCPRuntimeConfig.from_file(config_path)
+
+        self.assertTrue(runtime_config.auth.enabled)
+        self.assertEqual(runtime_config.auth.verification, "jwt-jwks")
+        self.assertEqual(runtime_config.auth.audience, "mcp-stock-server")
+        self.assertEqual(runtime_config.auth.required_scopes, ["stock:daily:read"])
+
+    def test_create_mcp_server_injects_http_auth_when_enabled(self):
+        from mcp_stock_server.main import MCPAuthConfig
+        from mcp_stock_server.server import create_mcp_server
+
+        captured = {}
+
+        class FakeFastMCP:
+            def __init__(self, name, **kwargs):
+                self.name = name
+                self.kwargs = kwargs
+                self.registered = {}
+                captured.update(kwargs)
+
+            def tool(self, name=None, description=None):
+                def decorator(func):
+                    self.registered[name or func.__name__] = func
+                    return func
+
+                return decorator
+
+        class FakeStockMasterService:
+            def list_stock_codes(self):
+                return []
+
+        class FakeStockDailyService:
+            def get_stock_daily_bars(self, time, codes, limit=120):
+                return type("Response", (), {"time": time, "items": []})()
+
+            def upsert_stock_daily_bars(self, request):
+                return type(
+                    "Response",
+                    (),
+                    {"time": request.time, "total": 0, "success": 0, "failed": 0, "errors": []},
+                )()
+
+        auth_config = MCPAuthConfig(
+            enabled=True,
+            mode="resource-server",
+            verification="jwt-jwks",
+            issuer_url="https://issuer.example.com",
+            resource_server_url="https://api.example.com/mcp",
+            audience="mcp-stock-server",
+            jwks_uri="https://issuer.example.com/.well-known/jwks.json",
+            required_scopes=["stock:daily:read"],
+        )
+
+        create_mcp_server(
+            FakeStockMasterService(),
+            FakeStockDailyService(),
+            fastmcp_cls=FakeFastMCP,
+            transport="streamable-http",
+            auth_config=auth_config,
+        )
+
+        self.assertIn("auth", captured)
+        self.assertIn("token_verifier", captured)
+        self.assertEqual(str(captured["auth"].issuer_url), "https://issuer.example.com/")
+
+    def test_http_dispatch_uses_development_auth_context_after_entry_auth(self):
+        from mcp_stock_server.main import MCPAuthConfig
+        from mcp_stock_server.server import create_mcp_server
+        from mcp_stock_server.auth.context import AuthContext
+        from unittest.mock import patch
+
+        class FakeFastMCP:
+            def __init__(self, name, **kwargs):
+                self.name = name
+                self.registered = {}
+
+            def tool(self, name=None, description=None):
+                def decorator(func):
+                    self.registered[name or func.__name__] = func
+                    return func
+
+                return decorator
+
+        class FakeStockMasterService:
+            def list_stock_codes(self):
+                return []
+
+        class FakeStockDailyService:
+            def get_stock_daily_bars(self, time, codes, limit=120):
+                return type("Response", (), {"time": time, "items": []})()
+
+            def upsert_stock_daily_bars(self, request):
+                return type(
+                    "Response",
+                    (),
+                    {"time": request.time, "total": 0, "success": 0, "failed": 0, "errors": []},
+                )()
+
+        auth_config = MCPAuthConfig(
+            enabled=True,
+            mode="resource-server",
+            verification="jwt-jwks",
+            issuer_url="https://issuer.example.com",
+            resource_server_url="https://api.example.com/mcp",
+            audience="mcp-stock-server",
+            jwks_uri="https://issuer.example.com/.well-known/jwks.json",
+            required_scopes=["mcp:tools"],
+        )
+
+        app = create_mcp_server(
+            FakeStockMasterService(),
+            FakeStockDailyService(),
+            fastmcp_cls=FakeFastMCP,
+            transport="streamable-http",
+            auth_config=auth_config,
+        )
+
+        captured_contexts: list[AuthContext] = []
+
+        with (
+            patch("mcp_stock_server.server.get_access_token", return_value=object()) as get_token,
+            patch(
+                "mcp_stock_server.server.ToolDispatcher.dispatch",
+                autospec=True,
+                side_effect=lambda _self, name, args, context: captured_contexts.append(context)
+                or {"ok": True},
+            ),
+        ):
+            app.registered["get_stock_daily_bars"]("2026-05-26", ["000001"])
+
+        self.assertEqual(get_token.call_count, 1)
+        self.assertEqual(len(captured_contexts), 1)
+        self.assertEqual(captured_contexts[0].user_id, "local-dev")
+        self.assertIn("stock:daily:read", captured_contexts[0].scopes)
+
     def test_stock_tool_registry_exposes_metadata_and_destructive_flags(self):
         from mcp_stock_server.tooling.stock_tools import build_stock_tool_registry
 
