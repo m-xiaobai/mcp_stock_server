@@ -6,11 +6,17 @@ from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.server import Context
 from mcp.server.auth.middleware.auth_context import get_access_token
 
 from .audit.writer import JsonlAuditWriter
 from .auth.approval import InMemoryApprovalChecker
-from .auth.context import build_development_auth_context
+from .auth.context import build_development_auth_context, build_runtime_auth_context
+from .auth.elicitation import (
+    DestructiveApprovalForm,
+    build_destructive_approval_message,
+    supports_form_elicitation,
+)
 from .auth.oauth import MCPAuthConfig, build_token_verifier
 from .governance.policy import PolicyEngine
 from .governance.redaction import Redactor
@@ -89,22 +95,74 @@ def create_mcp_server(
         ),
         redactor=Redactor(),
     )
+    definitions = {definition.name: definition for definition in registry.list_tools()}
 
-    def dispatch_tool(name: str, args: dict[str, Any]) -> Any:
+    async def dispatch_tool(name: str, args: dict[str, Any], ctx: Context) -> Any:
+        definition = definitions[name]
         try:
             if transport == "streamable-http" and auth_config and auth_config.enabled:
                 # Trigger FastMCP auth context resolution; tool authorization still uses
                 # the existing development-style AuthContext after entry auth succeeds.
-                get_access_token()
-            return dispatcher.dispatch(
-                name=name,
-                args=args,
-                context=build_development_auth_context(registry.list_tools()),
-            )
+                access_token = get_access_token()
+                user_id = access_token.client_id
+            else:
+                user_id = "local-dev"
+
+            if transport == "streamable-http":
+                auth_context = build_runtime_auth_context(
+                    registry.list_tools(),
+                    user_id=user_id,
+                    tenant_id="default",
+                    request_id=ctx.request_id,
+                    grant_destructive_approvals=False,
+                )
+                if definition.destructive:
+                    if not supports_form_elicitation(ctx.session):
+                        dispatcher.record_denied(
+                            name=name,
+                            args=args,
+                            context=auth_context,
+                            error_code="approval_unsupported",
+                        )
+                        return error_response(
+                            "approval_unsupported",
+                            f"client does not support elicitation for {name}",
+                        )
+
+                    approval = await ctx.elicit(
+                        build_destructive_approval_message(name),
+                        DestructiveApprovalForm,
+                    )
+                    if approval.action == "cancel":
+                        dispatcher.record_denied(
+                            name=name,
+                            args=args,
+                            context=auth_context,
+                            error_code="approval_cancelled",
+                        )
+                        return error_response(
+                            "approval_cancelled",
+                            f"user cancelled destructive operation {name}",
+                        )
+                    if approval.action == "decline" or not approval.data.confirm:
+                        dispatcher.record_denied(
+                            name=name,
+                            args=args,
+                            context=auth_context,
+                            error_code="approval_declined",
+                        )
+                        return error_response(
+                            "approval_declined",
+                            f"user declined destructive operation {name}",
+                        )
+
+                    auth_context.approval_grants.add(name)
+            else:
+                auth_context = build_development_auth_context(registry.list_tools())
+
+            return dispatcher.dispatch(name=name, args=args, context=auth_context)
         except ToolDispatchError as exc:
             return error_response(exc.code, exc.message)
-
-    definitions = {definition.name: definition for definition in registry.list_tools()}
 
     # @app.tool(
     #     name="list_stock_codes",
@@ -117,22 +175,34 @@ def create_mcp_server(
         name="get_stock_daily_bars",
         description=definitions["get_stock_daily_bars"].description,
     )
-    def get_stock_daily_bars(time: str, codes: list[str]) -> dict[str, Any]:
-        return dispatch_tool("get_stock_daily_bars", {"time": time, "codes": codes})
+    async def get_stock_daily_bars(
+        time: str,
+        codes: list[str],
+        ctx: Context,
+    ) -> dict[str, Any]:
+        return await dispatch_tool("get_stock_daily_bars", {"time": time, "codes": codes}, ctx)
 
     @app.tool(
         name="upsert_stock_daily_bars",
         description=definitions["upsert_stock_daily_bars"].description,
     )
-    def upsert_stock_daily_bars(time: str, daily_data: list[dict[str, Any]]) -> dict[str, Any]:
-        return dispatch_tool("upsert_stock_daily_bars", {"time": time, "daily_data": daily_data})
+    async def upsert_stock_daily_bars(
+        time: str,
+        daily_data: list[dict[str, Any]],
+        ctx: Context,
+    ) -> dict[str, Any]:
+        return await dispatch_tool(
+            "upsert_stock_daily_bars",
+            {"time": time, "daily_data": daily_data},
+            ctx,
+        )
 
     @app.tool(
         name="insert_stock_daily_bars_after_close",
         description=definitions["insert_stock_daily_bars_after_close"].description,
     )
-    def insert_stock_daily_bars_after_close(time: str) -> dict[str, Any]:
-        return dispatch_tool("insert_stock_daily_bars_after_close", {"time": time})
+    async def insert_stock_daily_bars_after_close(time: str, ctx: Context) -> dict[str, Any]:
+        return await dispatch_tool("insert_stock_daily_bars_after_close", {"time": time}, ctx)
 
     # @app.tool(
     #     name="compute_short_trend",
@@ -213,13 +283,15 @@ def create_mcp_server(
         name="get_technical_snapshot",
         description=definitions["get_technical_snapshot"].description,
     )
-    def get_technical_snapshot(
+    async def get_technical_snapshot(
         symbols: list[str],
         trade_date: str,
         lookback_days: int = 60,
         include_bars: bool = False,
+        ctx: Context | None = None,
     ) -> dict[str, Any]:
-        return dispatch_tool(
+        assert ctx is not None
+        return await dispatch_tool(
             "get_technical_snapshot",
             {
                 "symbols": symbols,
@@ -227,6 +299,7 @@ def create_mcp_server(
                 "lookback_days": lookback_days,
                 "include_bars": include_bars,
             },
+            ctx,
         )
 
     @app.tool(
@@ -240,8 +313,8 @@ def create_mcp_server(
         name="screen_b1_stocks",
         description=definitions["screen_b1_stocks"].description,
     )
-    def screen_b1_stocks(time: str) -> dict[str, Any]:
-        return dispatch_tool("screen_b1_stocks", {"time": time})
+    async def screen_b1_stocks(time: str, ctx: Context) -> dict[str, Any]:
+        return await dispatch_tool("screen_b1_stocks", {"time": time}, ctx)
 
     app.tool_registry = registry
     app.capability_manifest = build_capability_manifest(

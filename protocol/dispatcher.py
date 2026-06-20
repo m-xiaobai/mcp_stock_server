@@ -85,6 +85,24 @@ class ToolDispatcher:
         )
         return result
 
+    def record_denied(
+        self,
+        *,
+        name: str,
+        args: dict[str, Any],
+        context: AuthContext,
+        error_code: str,
+    ) -> None:
+        self._write_audit(
+            context=context,
+            name=name,
+            args=args,
+            response=None,
+            outcome="denied",
+            error_code=error_code,
+            started_at=time.time(),
+        )
+
     def _write_audit(
         self,
         context: AuthContext,

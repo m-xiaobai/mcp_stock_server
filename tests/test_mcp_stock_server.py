@@ -942,7 +942,7 @@ class MCPStockServerTests(unittest.TestCase):
         self.assertEqual(payload["success"], 1)
         self.assertEqual(payload["failed"], 0)
 
-    def test_write_service_splits_insert_and_update_rows(self):
+    def test_write_service_upserts_rows(self):
         from mcp_stock_server.models.request_models import UpsertStockDailyBarsRequest
         from mcp_stock_server.services.stock_daily_service import StockDailyService
 
@@ -952,18 +952,10 @@ class MCPStockServerTests(unittest.TestCase):
 
         class FakeDailyRepository:
             def __init__(self):
-                self.inserted = []
-                self.updated = []
+                self.upserted = []
 
-            def existing_daily_keys(self, keys):
-                return {("000001", date(2026, 5, 26))}
-
-            def batch_insert(self, rows):
-                self.inserted.extend(rows)
-                return len(rows)
-
-            def batch_update(self, rows):
-                self.updated.extend(rows)
+            def batch_upsert(self, rows):
+                self.upserted.extend(rows)
                 return len(rows)
 
         daily_repo = FakeDailyRepository()
@@ -1002,10 +994,7 @@ class MCPStockServerTests(unittest.TestCase):
         response = service.upsert_stock_daily_bars(request)
 
         self.assertEqual(response.success, 2)
-        self.assertEqual(len(daily_repo.updated), 1)
-        self.assertEqual(len(daily_repo.inserted), 1)
-        self.assertEqual(daily_repo.updated[0].code, "000001")
-        self.assertEqual(daily_repo.inserted[0].code, "000002")
+        self.assertEqual([item.code for item in daily_repo.upserted], ["000001", "000002"])
 
     def test_mysql_stock_master_repository_lists_all_codes(self):
         from mcp_stock_server.repositories.stock_master_repository import MySQLStockMasterRepository
@@ -1134,7 +1123,7 @@ class MCPStockServerTests(unittest.TestCase):
         executed_sql = connection.cursors[0].executed[0][0]
         self.assertIn("ORDER BY stock_code, trade_date ASC", executed_sql)
 
-    def test_mysql_stock_daily_repository_batch_insert_builds_params(self):
+    def test_mysql_stock_daily_repository_batch_upsert_builds_params(self):
         from mcp_stock_server.models.request_models import UpsertStockDailyDataItem
         from mcp_stock_server.repositories.stock_daily_repository import MySQLStockDailyRepository
 
@@ -1178,12 +1167,13 @@ class MCPStockServerTests(unittest.TestCase):
             )
         ]
 
-        inserted = repository.batch_insert(rows)
+        inserted = repository.batch_upsert(rows)
 
         self.assertEqual(inserted, 1)
         self.assertTrue(connection.committed)
         sql, params = connection.cursor_obj.executemany_calls[0]
         self.assertIn("INSERT INTO stock_daily", sql)
+        self.assertIn("ON DUPLICATE KEY UPDATE", sql)
         self.assertEqual(params[0][0], "600000")
 
     def test_build_mysql_services_uses_mysql_repositories(self):

@@ -20,18 +20,35 @@ class AuthContext:
 
 
 def build_development_auth_context(tool_definitions: list["ToolDefinition"]) -> AuthContext:
+    return build_runtime_auth_context(
+        tool_definitions,
+        user_id="local-dev",
+        tenant_id="local",
+        request_id=f"dev-{uuid4().hex}",
+        grant_destructive_approvals=True,
+    )
+
+
+def build_runtime_auth_context(
+    tool_definitions: list["ToolDefinition"],
+    *,
+    user_id: str,
+    tenant_id: str,
+    request_id: str,
+    grant_destructive_approvals: bool,
+) -> AuthContext:
     scopes: set[str] = set()
     approval_grants: set[str] = set()
     for definition in tool_definitions:
         scopes.update(definition.required_scopes)
-        if definition.destructive:
+        if definition.destructive and grant_destructive_approvals:
             approval_grants.add(definition.name)
     return AuthContext(
-        user_id="local-dev",
-        tenant_id="local",
+        user_id=user_id,
+        tenant_id=tenant_id,
         scopes=scopes,
         approval_grants=approval_grants,
-        request_id=f"dev-{uuid4().hex}",
+        request_id=request_id,
     )
 
 

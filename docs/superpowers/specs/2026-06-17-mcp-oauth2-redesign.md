@@ -194,7 +194,127 @@ OAuth2 不直接参与工具级权限决策，也不负责 destructive approval 
 - `stock:daily:write` 不自动等于 destructive 批准
 - 高风险工具仍可独立治理
 
-### 8. Manifest 与运行文档同步更新
+### 8. 敏感操作确认机制
+
+在 `streamable-http` 路径上，对 `destructive=True` 的工具增加显式敏感操作确认机制。该机制与 OAuth2 并列存在：
+
+- OAuth2
+  - 负责 HTTP 入口认证
+- 敏感操作确认
+  - 负责 destructive 工具执行前确认
+
+本阶段仅覆盖 `streamable-http`，不覆盖 `stdio`。
+
+#### 选型结论
+
+本阶段对 destructive 工具只采用 `elicitation.form` 作为确认机制，不实现 `approval_required + approval_token` 的双调用确认回退。
+
+采用 `Elicitation-only` 的原因：
+
+- `elicitation.form` 是 MCP 协议内的标准能力
+- destructive 确认可以在当前调用链内完成，不需要客户端主动重发工具调用
+- 不需要为每个客户端单独实现私有的 `approval_required` 重试逻辑
+- 更适合作为跨客户端的长期治理能力
+
+不采用双调用确认回退的原因：
+
+- 双调用不是 MCP 的标准确认能力，而是一套客户端协作协议
+- 每个客户端都必须单独适配：
+  - 识别 `approval_required`
+  - 保存原始请求
+  - 再次调用同一工具
+  - 在 `_meta` 中携带 `approval_token`
+- 不利于多客户端统一
+- 用户体验更绕，接近“失败一次，再确认，再重试”
+
+本阶段的实现边界是：
+
+- 支持 `elicitation.form` 的客户端可以执行 destructive 工具
+- 不支持 Elicitation 的客户端不能执行 destructive 工具
+- 双调用确认只作为备选方案分析保留，不进入当前实现
+
+#### Elicitation 主路径
+
+destructive 请求进入统一 dispatch 后，服务端按如下顺序处理：
+
+1. input schema 校验
+2. scope 校验
+3. destructive 判定
+4. client capability 检查
+5. 若支持 `elicitation.form`，通过 `Context.elicit(...)` 发起 form mode 确认
+
+Elicitation 表单模型固定为最小确认集：
+
+- `confirm: bool`
+- `reason: str | None`
+
+确认消息必须明确提示：
+
+- 当前工具名
+- 该操作属于 destructive 工具
+- 本次确认仅对当前参数有效
+
+结果处理规则：
+
+- `accept + confirm=true`
+  - 允许继续执行工具
+- `accept + confirm=false`
+  - 视为用户拒绝
+- `decline`
+  - 拒绝执行
+- `cancel`
+  - 拒绝执行
+
+Elicitation 只负责确认交互，不直接替代服务端 approval 约束模型。
+
+#### 错误语义
+
+敏感操作确认机制需要引入以下错误语义：
+
+- `approval_declined`
+  - 用户明确拒绝
+- `approval_cancelled`
+  - 用户取消确认
+- `approval_unsupported`
+  - 当前客户端不支持 `elicitation.form`，因此不能执行 destructive 工具
+
+其中：
+
+- Elicitation 拒绝或取消属于明确拒绝结果，不执行工具
+- 客户端不支持 Elicitation 时，直接返回明确拒绝，而不是进入私有 fallback 协议
+
+#### Elicitation 与双调用确认的对比
+
+| 维度 | Elicitation | 双调用确认 |
+|---|---|---|
+| 协议属性 | MCP 标准能力 | 客户端协作协议 |
+| 确认发起方 | 服务端在当前调用内主动发起 | 客户端收到错误后主动二次调用 |
+| 调用次数 | 一次调用内完成 | 两次工具调用 |
+| 客户端要求 | 支持 `elicitation.form` | 必须专门适配 `approval_required + retry` |
+| 多客户端通用性 | 更强 | 更弱 |
+| 用户体验 | 更自然，像调用中确认 | 更绕，像失败后重试 |
+| 维护成本 | 较低，依赖标准能力 | 较高，需要每个客户端分别实现 |
+
+本阶段基于以上对比，选择 Elicitation 作为唯一确认方案。
+
+#### 审计语义
+
+审计需要补充分层 outcome，至少包括：
+
+- `approval_prompted`
+- `approval_declined`
+- `approval_cancelled`
+- `approval_unsupported`
+- `allowed`
+- `denied`
+- `failed`
+
+审计中不得记录：
+
+- OAuth access token
+- client secret
+
+### 9. Manifest 与运行文档同步更新
 
 `capability_manifest` 增加认证摘要字段：
 
@@ -231,7 +351,10 @@ OAuth2 不直接参与工具级权限决策，也不负责 destructive approval 
   - verifier 工厂
   - JWT/JWKS verifier
   - Introspection verifier
+  - approval orchestration
 - 保持 `AuthContext` 仍为内部统一授权结构，不让业务层直接依赖 SDK 的 `AccessToken`
+- `ApprovalChecker` 不再只依赖 `approval_grants` 集合，而是接受：
+  - Elicitation 成功结果
 
 ### Server wiring
 
@@ -244,6 +367,9 @@ OAuth2 不直接参与工具级权限决策，也不负责 destructive approval 
   - `token_verifier=...`
 - 否则不传 auth 相关参数
 - `run_streamable_http_server(...)` 接收 `auth_config`
+- destructive 工具调用链需要能够拿到 FastMCP `Context`
+- `Context.elicit(...)` 用于 Elicitation 主路径
+- 若客户端不支持 Elicitation，则直接返回明确拒绝
 
 ### Audit behavior
 
@@ -256,9 +382,9 @@ OAuth2 不直接参与工具级权限决策，也不负责 destructive approval 
 ## Test Plan
 
 - 配置解析测试：
-  - `auth.enabled=false` 时无 verifier
-  - `jwt-jwks` 模式必填字段校验
-  - `introspection` 模式必填字段校验
+- `auth.enabled=false` 时无 verifier
+- `jwt-jwks` 模式必填字段校验
+- `introspection` 模式必填字段校验
 - server 装配测试：
   - `stdio` 不启用 auth
   - `streamable-http + auth.enabled=true` 会注入 `AuthSettings` 和 `token_verifier`
@@ -279,7 +405,13 @@ OAuth2 不直接参与工具级权限决策，也不负责 destructive approval 
 - 授权链测试：
   - 入口级 scope 不满足 -> HTTP 403
   - HTTP 认证成功后，不因 token 缺少工具级 `stock:*` scope 而被 `PolicyEngine` 拒绝
-  - destructive 工具无 approval -> 仍拒绝
+  - destructive 工具在客户端支持 `elicitation.form` 时触发 Elicitation
+  - `accept` -> destructive 工具执行
+  - `decline` -> destructive 工具拒绝
+  - `cancel` -> destructive 工具拒绝
+  - 客户端不支持 Elicitation -> 返回 `approval_unsupported`
+  - 非 destructive 工具不触发确认机制
+  - `stdio` 行为不变
 - manifest 测试：
   - HTTP + auth 模式下 manifest 反映 `auth_enabled/auth_mode/verification`
 
@@ -290,3 +422,6 @@ OAuth2 不直接参与工具级权限决策，也不负责 destructive approval 
 - 需要同时兼容 JWT/JWKS 与 introspection，因此 verifier 必须抽象化。
 - 工具级 `required_scopes` 继续保留在内部授权模型中，但 HTTP 路径不再从 OAuth2 token scope 推导工具权限。
 - destructive approval 仍为独立治理能力，不由 OAuth2 自动放行。
+- 敏感操作定义为当前所有 `destructive=True` 的工具。
+- Elicitation 使用 `form` 模式，不使用 `url` 模式。
+- 本阶段只面向支持 `elicitation.form` 的客户端，不实现双调用确认回退。

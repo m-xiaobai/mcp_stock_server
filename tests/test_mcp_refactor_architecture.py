@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 
 class MCPRefactorArchitectureTests(unittest.TestCase):
@@ -190,7 +192,10 @@ class MCPRefactorArchitectureTests(unittest.TestCase):
         captured_contexts: list[AuthContext] = []
 
         with (
-            patch("mcp_stock_server.server.get_access_token", return_value=object()) as get_token,
+            patch(
+                "mcp_stock_server.server.get_access_token",
+                return_value=SimpleNamespace(client_id="client-123"),
+            ) as get_token,
             patch(
                 "mcp_stock_server.server.ToolDispatcher.dispatch",
                 autospec=True,
@@ -198,12 +203,130 @@ class MCPRefactorArchitectureTests(unittest.TestCase):
                 or {"ok": True},
             ),
         ):
-            app.registered["get_stock_daily_bars"]("2026-05-26", ["000001"])
+            asyncio.run(app.registered["get_stock_daily_bars"]("2026-05-26", ["000001"], SimpleNamespace(request_id="req-1")))
 
         self.assertEqual(get_token.call_count, 1)
         self.assertEqual(len(captured_contexts), 1)
-        self.assertEqual(captured_contexts[0].user_id, "local-dev")
+        self.assertEqual(captured_contexts[0].user_id, "client-123")
         self.assertIn("stock:daily:read", captured_contexts[0].scopes)
+        self.assertEqual(captured_contexts[0].approval_grants, set())
+
+    def test_http_destructive_tool_requires_elicitation_support(self):
+        from mcp_stock_server.server import create_mcp_server
+
+        class FakeFastMCP:
+            def __init__(self, name, **kwargs):
+                self.name = name
+                self.registered = {}
+
+            def tool(self, name=None, description=None):
+                def decorator(func):
+                    self.registered[name or func.__name__] = func
+                    return func
+
+                return decorator
+
+        class FakeStockMasterService:
+            def list_stock_codes(self):
+                return []
+
+        class FakeStockDailyService:
+            def get_stock_daily_bars(self, time, codes, limit=120):
+                return type("Response", (), {"time": time, "items": []})()
+
+            def upsert_stock_daily_bars(self, request):
+                return type(
+                    "Response",
+                    (),
+                    {"time": request.time, "total": 0, "success": 0, "failed": 0, "errors": []},
+                )()
+
+        class FakeSession:
+            def check_client_capability(self, capability):
+                return False
+
+        fake_ctx = SimpleNamespace(request_id="req-2", session=FakeSession())
+        app = create_mcp_server(
+            FakeStockMasterService(),
+            FakeStockDailyService(),
+            fastmcp_cls=FakeFastMCP,
+            transport="streamable-http",
+        )
+
+        with patch("mcp_stock_server.server.ToolDispatcher.record_denied", autospec=True):
+            result = asyncio.run(
+                app.registered["upsert_stock_daily_bars"]("2026-05-26", [], fake_ctx)
+            )
+
+        self.assertEqual(result["error"]["code"], "approval_unsupported")
+
+    def test_http_destructive_tool_executes_after_elicitation_accept(self):
+        from mcp_stock_server.server import create_mcp_server
+        from unittest.mock import patch
+
+        class FakeFastMCP:
+            def __init__(self, name, **kwargs):
+                self.name = name
+                self.registered = {}
+
+            def tool(self, name=None, description=None):
+                def decorator(func):
+                    self.registered[name or func.__name__] = func
+                    return func
+
+                return decorator
+
+        class FakeStockMasterService:
+            def list_stock_codes(self):
+                return []
+
+        class FakeStockDailyService:
+            def get_stock_daily_bars(self, time, codes, limit=120):
+                return type("Response", (), {"time": time, "items": []})()
+
+            def upsert_stock_daily_bars(self, request):
+                return type(
+                    "Response",
+                    (),
+                    {"time": request.time, "total": 1, "success": 1, "failed": 0, "errors": []},
+                )()
+
+        class FakeSession:
+            def check_client_capability(self, capability):
+                return True
+
+        class FakeContext:
+            def __init__(self):
+                self.request_id = "req-3"
+                self.session = FakeSession()
+
+            async def elicit(self, message, schema):
+                return SimpleNamespace(
+                    action="accept",
+                    data=SimpleNamespace(confirm=True, reason="ok"),
+                )
+
+        app = create_mcp_server(
+            FakeStockMasterService(),
+            FakeStockDailyService(),
+            fastmcp_cls=FakeFastMCP,
+            transport="streamable-http",
+        )
+        captured_contexts: list[AuthContext] = []
+
+        with patch(
+            "mcp_stock_server.server.ToolDispatcher.dispatch",
+            autospec=True,
+            side_effect=lambda _self, name, args, context: captured_contexts.append(context)
+            or {"ok": True},
+        ):
+            result = asyncio.run(
+                app.registered["upsert_stock_daily_bars"]("2026-05-26", [], FakeContext())
+            )
+
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(len(captured_contexts), 1)
+        self.assertIn("upsert_stock_daily_bars", captured_contexts[0].approval_grants)
 
     def test_stock_tool_registry_exposes_metadata_and_destructive_flags(self):
         from mcp_stock_server.tooling.stock_tools import build_stock_tool_registry
@@ -390,7 +513,7 @@ class MCPRefactorArchitectureTests(unittest.TestCase):
             fastmcp_cls=FakeFastMCP,
         )
 
-        self.assertIn("list_stock_codes", app.registered)
+        self.assertIn("get_stock_daily_bars", app.registered)
         self.assertEqual(
             app.registered["upsert_stock_daily_bars"]["description"],
             "Insert or update stock daily bars after market close.",

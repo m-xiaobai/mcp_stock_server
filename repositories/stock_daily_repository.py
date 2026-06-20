@@ -25,6 +25,9 @@ class StockDailyRepository(Protocol):
     def batch_update(self, rows: list[UpsertStockDailyDataItem]) -> int:
         ...
 
+    def batch_upsert(self, rows: list[UpsertStockDailyDataItem]) -> int:
+        ...
+
 
 @dataclass(slots=True)
 class InMemoryStockDailyRepository:
@@ -54,6 +57,27 @@ class InMemoryStockDailyRepository:
         return len(rows)
 
     def batch_update(self, rows: list[UpsertStockDailyDataItem]) -> int:
+        return len(rows)
+
+    def batch_upsert(self, rows: list[UpsertStockDailyDataItem]) -> int:
+        index_by_key = {(item.code, item.trade_date): idx for idx, item in enumerate(self.items)}
+        for row in rows:
+            key = (row.code, row.trade_date)
+            daily_bar = DailyBar(
+                code=row.code,
+                trade_date=row.trade_date,
+                open=row.open,
+                close=row.close,
+                high=row.high,
+                low=row.low,
+                vol=row.vol,
+                amount=row.amount,
+            )
+            if key in index_by_key:
+                self.items[index_by_key[key]] = daily_bar
+            else:
+                index_by_key[key] = len(self.items)
+                self.items.append(daily_bar)
         return len(rows)
 
 
@@ -196,4 +220,52 @@ WHERE stock_code = %s
             cursor.executemany(sql, params)
         if hasattr(connection, "commit"):
             connection.commit()
+        return len(rows)
+
+    def batch_upsert(self, rows: list[UpsertStockDailyDataItem]) -> int:
+        if not rows:
+            return 0
+        sql = """
+INSERT INTO stock_daily (
+    stock_code,
+    open,
+    close,
+    high,
+    low,
+    vol,
+    amount,
+    trade_date
+) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+ON DUPLICATE KEY UPDATE
+    open = VALUES(open),
+    close = VALUES(close),
+    high = VALUES(high),
+    low = VALUES(low),
+    vol = VALUES(vol),
+    amount = VALUES(amount),
+    update_time = CURRENT_TIMESTAMP
+""".strip()
+        params = [
+            (
+                row.code,
+                row.open,
+                row.close,
+                row.high,
+                row.low,
+                row.vol,
+                row.amount,
+                row.trade_date,
+            )
+            for row in rows
+        ]
+        connection = self.connection_factory()
+        try:
+            with connection.cursor() as cursor:
+                cursor.executemany(sql, params)
+            if hasattr(connection, "commit"):
+                connection.commit()
+        except Exception:
+            if hasattr(connection, "rollback"):
+                connection.rollback()
+            raise
         return len(rows)

@@ -5,8 +5,8 @@ from dataclasses import dataclass
 from datetime import date
 from typing import DefaultDict
 
-from ..models.db_models import DailyBar, StockDailyBarsItem
 from ..models.request_models import UpsertStockDailyBarsRequest, UpsertStockDailyDataItem
+from ..models.db_models import DailyBar, StockDailyBarsItem
 from ..models.response_models import (
     GetStockDailyBarsResponse,
     UpsertErrorItem,
@@ -46,23 +46,11 @@ class StockDailyService:
                 errors.append(UpsertErrorItem(code=item.code, reason="stock code not found"))
                 continue
             valid_rows.append(item)
-        existing_keys: set[tuple[str, date]] = self.stock_daily_repository.existing_daily_keys(
-            [(item.code, item.trade_date) for item in valid_rows]
-        )
-        to_insert: list[UpsertStockDailyDataItem] = []
-        to_update: list[UpsertStockDailyDataItem] = []
-        for item in valid_rows:
-            key = (item.code, item.trade_date)
-            if key in existing_keys:
-                to_update.append(item)
-            else:
-                to_insert.append(item)
 
         success = 0
-        if to_insert:
-            success += self.stock_daily_repository.batch_insert(to_insert)
-        if to_update:
-            success += self.stock_daily_repository.batch_update(to_update)
+        if valid_rows:
+            success += self.stock_daily_repository.batch_upsert(valid_rows)
+
         failed = len(errors)
         return UpsertStockDailyBarsResponse(
             time=request.time,
