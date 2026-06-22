@@ -4,6 +4,7 @@ import asyncio
 import json
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -328,6 +329,225 @@ class MCPRefactorArchitectureTests(unittest.TestCase):
         self.assertEqual(len(captured_contexts), 1)
         self.assertIn("upsert_stock_daily_bars", captured_contexts[0].approval_grants)
 
+    def test_stdio_task_augmented_after_close_tool_returns_create_task_result(self):
+        import mcp.types as mcp_types
+        from mcp_stock_server.server import create_mcp_server
+
+        class FakeFastMCP:
+            def __init__(self, name, **kwargs):
+                self.name = name
+                self.registered = {}
+
+            def tool(self, name=None, description=None):
+                def decorator(func):
+                    self.registered[name or func.__name__] = func
+                    return func
+
+                return decorator
+
+        class FakeStockMasterService:
+            def list_stock_codes(self):
+                return []
+
+        class FakeStockDailyService:
+            def get_stock_daily_bars(self, time, codes, limit=120):
+                return type("Response", (), {"time": time, "items": []})()
+
+            def upsert_stock_daily_bars(self, request):
+                return type(
+                    "Response",
+                    (),
+                    {"time": request.time, "total": 1, "success": 1, "failed": 0, "errors": []},
+                )()
+
+        class FakeExperimental:
+            def __init__(self):
+                self.result = None
+
+            @property
+            def is_task(self):
+                return True
+
+            @property
+            def client_supports_tasks(self):
+                return True
+
+            async def run_task(self, work, *args, **kwargs):
+                self.result = await work(SimpleNamespace())
+                task = mcp_types.Task(
+                    taskId="task-1",
+                    status=mcp_types.TASK_STATUS_WORKING,
+                    createdAt=datetime.now(timezone.utc),
+                    lastUpdatedAt=datetime.now(timezone.utc),
+                    ttl=60000,
+                )
+                return mcp_types.CreateTaskResult(task=task)
+
+        app = create_mcp_server(
+            FakeStockMasterService(),
+            FakeStockDailyService(),
+            fastmcp_cls=FakeFastMCP,
+            transport="stdio",
+        )
+        experimental = FakeExperimental()
+        fake_ctx = SimpleNamespace(
+            request_id="req-task-1",
+            request_context=SimpleNamespace(experimental=experimental),
+        )
+
+        with patch(
+            "mcp_stock_server.server.ToolDispatcher.dispatch",
+            autospec=True,
+            return_value={"ok": True},
+        ) as dispatch:
+            result = asyncio.run(app.registered["insert_stock_daily_bars_after_close"]("2026-05-26", fake_ctx))
+
+        self.assertIsInstance(result, mcp_types.CreateTaskResult)
+        self.assertEqual(dispatch.call_count, 1)
+        self.assertIsInstance(experimental.result, mcp_types.CallToolResult)
+        self.assertEqual(experimental.result.structuredContent, {"ok": True})
+        self.assertFalse(experimental.result.isError)
+
+    def test_stdio_task_augmented_after_close_tool_requires_client_task_capability(self):
+        from mcp_stock_server.server import create_mcp_server
+
+        class FakeFastMCP:
+            def __init__(self, name, **kwargs):
+                self.name = name
+                self.registered = {}
+
+            def tool(self, name=None, description=None):
+                def decorator(func):
+                    self.registered[name or func.__name__] = func
+                    return func
+
+                return decorator
+
+        class FakeStockMasterService:
+            def list_stock_codes(self):
+                return []
+
+        class FakeStockDailyService:
+            def get_stock_daily_bars(self, time, codes, limit=120):
+                return type("Response", (), {"time": time, "items": []})()
+
+            def upsert_stock_daily_bars(self, request):
+                return type(
+                    "Response",
+                    (),
+                    {"time": request.time, "total": 1, "success": 1, "failed": 0, "errors": []},
+                )()
+
+        class FakeExperimental:
+            @property
+            def is_task(self):
+                return True
+
+            @property
+            def client_supports_tasks(self):
+                return False
+
+            async def run_task(self, work, *args, **kwargs):
+                raise AssertionError("run_task should not be called when the client lacks task support")
+
+        app = create_mcp_server(
+            FakeStockMasterService(),
+            FakeStockDailyService(),
+            fastmcp_cls=FakeFastMCP,
+            transport="stdio",
+        )
+        fake_ctx = SimpleNamespace(
+            request_id="req-task-unsupported",
+            request_context=SimpleNamespace(experimental=FakeExperimental()),
+        )
+
+        with patch("mcp_stock_server.server.ToolDispatcher.dispatch", autospec=True) as dispatch:
+            result = asyncio.run(
+                app.registered["insert_stock_daily_bars_after_close"]("2026-05-26", fake_ctx)
+            )
+
+        self.assertEqual(result["error"]["code"], "task_unsupported")
+        self.assertIn("task capability", result["error"]["message"])
+        self.assertEqual(dispatch.call_count, 0)
+
+    def test_real_fastmcp_list_tools_marks_after_close_tool_task_optional(self):
+        import importlib.util
+
+        if importlib.util.find_spec("mcp") is None:
+            self.skipTest("mcp package is not installed in the current test environment")
+
+        import mcp.types as mcp_types
+        from mcp_stock_server.server import create_mcp_server
+
+        class FakeStockMasterService:
+            def list_stock_codes(self):
+                return []
+
+        class FakeStockDailyService:
+            def get_stock_daily_bars(self, time, codes, limit=120):
+                return type("Response", (), {"time": time, "items": []})()
+
+            def upsert_stock_daily_bars(self, request):
+                return type(
+                    "Response",
+                    (),
+                    {"time": request.time, "total": 0, "success": 0, "failed": 0, "errors": []},
+                )()
+
+        app = create_mcp_server(
+            FakeStockMasterService(),
+            FakeStockDailyService(),
+            transport="streamable-http",
+        )
+
+        tools = asyncio.run(app.list_tools())
+        tool_map = {tool.name: tool for tool in tools}
+
+        self.assertIn("insert_stock_daily_bars_after_close", tool_map)
+        self.assertIsNotNone(tool_map["insert_stock_daily_bars_after_close"].execution)
+        self.assertEqual(
+            tool_map["insert_stock_daily_bars_after_close"].execution.taskSupport,
+            mcp_types.TASK_OPTIONAL,
+        )
+
+    def test_real_fastmcp_initialization_advertises_tasks_capability(self):
+        import importlib.util
+
+        if importlib.util.find_spec("mcp") is None:
+            self.skipTest("mcp package is not installed in the current test environment")
+
+        from mcp_stock_server.server import create_mcp_server
+
+        class FakeStockMasterService:
+            def list_stock_codes(self):
+                return []
+
+        class FakeStockDailyService:
+            def get_stock_daily_bars(self, time, codes, limit=120):
+                return type("Response", (), {"time": time, "items": []})()
+
+            def upsert_stock_daily_bars(self, request):
+                return type(
+                    "Response",
+                    (),
+                    {"time": request.time, "total": 0, "success": 0, "failed": 0, "errors": []},
+                )()
+
+        app = create_mcp_server(
+            FakeStockMasterService(),
+            FakeStockDailyService(),
+            transport="streamable-http",
+        )
+
+        capabilities = app._mcp_server.create_initialization_options().capabilities
+        self.assertIsNotNone(capabilities.tasks)
+        self.assertIsNotNone(capabilities.tasks.list)
+        self.assertIsNotNone(capabilities.tasks.cancel)
+        self.assertIsNotNone(capabilities.tasks.requests)
+        self.assertIsNotNone(capabilities.tasks.requests.tools)
+        self.assertIsNotNone(capabilities.tasks.requests.tools.call)
+        self.assertIn("io.modelcontextprotocol/tasks", capabilities.extensions)
+
     def test_stock_tool_registry_exposes_metadata_and_destructive_flags(self):
         from mcp_stock_server.tooling.stock_tools import build_stock_tool_registry
 
@@ -409,10 +629,14 @@ class MCPRefactorArchitectureTests(unittest.TestCase):
             server_name="mcp-stock-server",
             version="1.0.0",
             transport="stdio",
+            tasks_enabled=True,
+            task_aware_tools=["insert_stock_daily_bars_after_close"],
         )
 
         self.assertEqual(manifest["server"], "mcp-stock-server")
         self.assertEqual(manifest["transport"], "stdio")
+        self.assertTrue(manifest["tasks"]["enabled"])
+        self.assertEqual(manifest["tasks"]["task_aware_tools"], ["insert_stock_daily_bars_after_close"])
         self.assertEqual(len(manifest["tools"]), len(registry.list_tools()))
         destructive_map = {tool["name"]: tool["destructive"] for tool in manifest["tools"]}
         self.assertTrue(destructive_map["upsert_stock_daily_bars"])

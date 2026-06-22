@@ -8,11 +8,18 @@ def build_capability_manifest(
     server_name: str,
     version: str,
     transport: str,
+    *,
+    tasks_enabled: bool = False,
+    task_aware_tools: list[str] | None = None,
 ) -> dict[str, object]:
     return {
         "server": server_name,
         "version": version,
         "transport": transport,
+        "tasks": {
+            "enabled": tasks_enabled,
+            "task_aware_tools": sorted(task_aware_tools or []),
+        },
         "tools": [
             {
                 "name": definition.name,

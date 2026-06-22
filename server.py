@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 import logging
 import sys
 from pathlib import Path
 from typing import Any
 
+import mcp.types as mcp_types
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.server import Context
 from mcp.server.auth.middleware.auth_context import get_access_token
@@ -29,6 +31,29 @@ from .tooling.stock_tools import build_stock_tool_registry
 
 
 logger = logging.getLogger(__name__)
+
+TASK_AWARE_TOOLS = {"insert_stock_daily_bars_after_close"}
+TASK_EXTENSION_NAME = "io.modelcontextprotocol/tasks"
+
+
+def _to_call_tool_result(payload: Any) -> mcp_types.CallToolResult:
+    if isinstance(payload, dict):
+        text = json.dumps(payload, ensure_ascii=False, indent=2)
+        return mcp_types.CallToolResult(
+            content=[mcp_types.TextContent(type="text", text=text)],
+            structuredContent=payload,
+            isError=False,
+        )
+    if isinstance(payload, list):
+        text = json.dumps(payload, ensure_ascii=False, indent=2)
+        return mcp_types.CallToolResult(
+            content=[mcp_types.TextContent(type="text", text=text)],
+            isError=False,
+        )
+    return mcp_types.CallToolResult(
+        content=[mcp_types.TextContent(type="text", text=str(payload))],
+        isError=False,
+    )
 
 
 def _build_fastmcp_app(
@@ -86,6 +111,19 @@ def create_mcp_server(
         streamable_http_path=streamable_http_path,
         auth_config=auth_config,
     )
+    if hasattr(app, "_mcp_server") and hasattr(app._mcp_server, "experimental"):
+        app._mcp_server.experimental.enable_tasks()
+        original_create_initialization_options = app._mcp_server.create_initialization_options
+
+        def create_initialization_options_with_tasks(*args: Any, **kwargs: Any):
+            options = original_create_initialization_options(*args, **kwargs)
+            capabilities = options.capabilities
+            extensions = dict(getattr(capabilities, "extensions", {}) or {})
+            extensions[TASK_EXTENSION_NAME] = {}
+            setattr(capabilities, "extensions", extensions)
+            return options
+
+        app._mcp_server.create_initialization_options = create_initialization_options_with_tasks
     registry = build_stock_tool_registry(stock_master_service, stock_daily_service)
     dispatcher = ToolDispatcher(
         registry=registry,
@@ -97,7 +135,13 @@ def create_mcp_server(
     )
     definitions = {definition.name: definition for definition in registry.list_tools()}
 
-    async def dispatch_tool(name: str, args: dict[str, Any], ctx: Context) -> Any:
+    async def dispatch_tool(
+        name: str,
+        args: dict[str, Any],
+        ctx: Context,
+        *,
+        allow_task_execution: bool = False,
+    ) -> Any:
         definition = definitions[name]
         try:
             if transport == "streamable-http" and auth_config and auth_config.enabled:
@@ -160,6 +204,26 @@ def create_mcp_server(
             else:
                 auth_context = build_development_auth_context(registry.list_tools())
 
+            experimental = getattr(getattr(ctx, "request_context", None), "experimental", None)
+            if (
+                allow_task_execution
+                and name in TASK_AWARE_TOOLS
+                and experimental is not None
+                and getattr(experimental, "is_task", False)
+            ):
+                if not getattr(experimental, "client_supports_tasks", False):
+                    return error_response(
+                        "task_unsupported",
+                        f"client does not declare task capability for {name}",
+                    )
+
+                async def work(task_ctx: Any) -> mcp_types.CallToolResult:
+                    del task_ctx
+                    result = dispatcher.dispatch(name=name, args=args, context=auth_context)
+                    return _to_call_tool_result(result)
+
+                return await experimental.run_task(work)
+
             return dispatcher.dispatch(name=name, args=args, context=auth_context)
         except ToolDispatchError as exc:
             return error_response(exc.code, exc.message)
@@ -202,7 +266,12 @@ def create_mcp_server(
         description=definitions["insert_stock_daily_bars_after_close"].description,
     )
     async def insert_stock_daily_bars_after_close(time: str, ctx: Context) -> dict[str, Any]:
-        return await dispatch_tool("insert_stock_daily_bars_after_close", {"time": time}, ctx)
+        return await dispatch_tool(
+            "insert_stock_daily_bars_after_close",
+            {"time": time},
+            ctx,
+            allow_task_execution=True,
+        )
 
     # @app.tool(
     #     name="compute_short_trend",
@@ -317,12 +386,28 @@ def create_mcp_server(
         return await dispatch_tool("screen_b1_stocks", {"time": time}, ctx)
 
     app.tool_registry = registry
+    tasks_enabled = bool(hasattr(app, "_mcp_server") and hasattr(app._mcp_server, "experimental"))
     app.capability_manifest = build_capability_manifest(
         registry=registry,
         server_name="mcp-stock-server",
         version="1.0.0",
         transport=transport,
+        tasks_enabled=tasks_enabled,
+        task_aware_tools=sorted(TASK_AWARE_TOOLS),
     )
+
+    if hasattr(app, "_mcp_server"):
+        original_list_tools = app.list_tools
+
+        async def list_tools_with_task_support() -> list[mcp_types.Tool]:
+            tools = await original_list_tools()
+            for tool in tools:
+                if tool.name in TASK_AWARE_TOOLS:
+                    tool.execution = mcp_types.ToolExecution(taskSupport=mcp_types.TASK_OPTIONAL)
+            return tools
+
+        app.list_tools = list_tools_with_task_support
+        app._mcp_server.list_tools()(list_tools_with_task_support)
 
     return app
 

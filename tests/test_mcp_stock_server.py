@@ -1500,6 +1500,12 @@ class MCPStockServerTests(unittest.TestCase):
         )
 
         self.assertEqual(app.capability_manifest["transport"], "stdio")
+        self.assertIn("tasks", app.capability_manifest)
+        self.assertFalse(app.capability_manifest["tasks"]["enabled"])
+        self.assertIn(
+            "insert_stock_daily_bars_after_close",
+            app.capability_manifest["tasks"]["task_aware_tools"],
+        )
 
     def test_create_mcp_server_manifest_uses_http_transport_when_configured(self):
         if importlib.util.find_spec("mcp") is None:
@@ -1541,6 +1547,7 @@ class MCPStockServerTests(unittest.TestCase):
         )
 
         self.assertEqual(app.capability_manifest["transport"], "streamable-http")
+        self.assertFalse(app.capability_manifest["tasks"]["enabled"])
 
     def test_registered_tool_returns_expected_payload(self):
         if importlib.util.find_spec("mcp") is None:
