@@ -32,7 +32,7 @@ from .tooling.stock_tools import build_stock_tool_registry
 
 logger = logging.getLogger(__name__)
 
-TASK_AWARE_TOOLS = {"insert_stock_daily_bars_after_close"}
+TASK_AWARE_TOOLS = {"insert_stock_daily_bars_after_close","get_technical_snapshot"}
 TASK_EXTENSION_NAME = "io.modelcontextprotocol/tasks"
 
 
