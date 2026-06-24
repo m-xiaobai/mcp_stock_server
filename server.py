@@ -279,7 +279,7 @@ def create_mcp_server(
         name="insert_stock_daily_bars_after_close",
         description=definitions["insert_stock_daily_bars_after_close"].description,
     )
-    async def insert_stock_daily_bars_after_close(time: str, ctx: Context) -> dict[str, Any]:
+    async def insert_stock_daily_bars_after_close(time: str, ctx: Context) -> dict[str, Any] | mcp_types.CreateTaskResult:
         return await dispatch_tool(
             "insert_stock_daily_bars_after_close",
             {"time": time},
@@ -372,7 +372,7 @@ def create_mcp_server(
         lookback_days: int = 60,
         include_bars: bool = False,
         ctx: Context | None = None,
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | mcp_types.CreateTaskResult:
         assert ctx is not None
         return await dispatch_tool(
             "get_technical_snapshot",
