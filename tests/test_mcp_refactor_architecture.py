@@ -416,6 +416,82 @@ class MCPRefactorArchitectureTests(unittest.TestCase):
         self.assertTrue(any("task work started" in message for message in captured_logs.output))
         self.assertTrue(any("task work finished" in message for message in captured_logs.output))
 
+    def test_after_close_tool_accepts_extension_declared_task_capability(self):
+        import mcp.types as mcp_types
+        from mcp_stock_server.server import create_mcp_server
+
+        class FakeFastMCP:
+            def __init__(self, name, **kwargs):
+                self.name = name
+                self.registered = {}
+
+            def tool(self, name=None, description=None):
+                def decorator(func):
+                    self.registered[name or func.__name__] = func
+                    return func
+
+                return decorator
+
+        class FakeStockMasterService:
+            def list_stock_codes(self):
+                return []
+
+        class FakeStockDailyService:
+            def get_stock_daily_bars(self, time, codes, limit=120):
+                return type("Response", (), {"time": time, "items": []})()
+
+            def upsert_stock_daily_bars(self, request):
+                return type(
+                    "Response",
+                    (),
+                    {"time": request.time, "total": 1, "success": 1, "failed": 0, "errors": []},
+                )()
+
+        class FakeExperimental:
+            def __init__(self):
+                self.result = None
+                self._client_capabilities = SimpleNamespace(tasks=None, extensions={"io.modelcontextprotocol/tasks": {}})
+
+            @property
+            def client_supports_tasks(self):
+                return False
+
+            async def run_task(self, work, *args, **kwargs):
+                self.result = await work(SimpleNamespace())
+                task = mcp_types.Task(
+                    taskId="task-ext-1",
+                    status=mcp_types.TASK_STATUS_WORKING,
+                    createdAt=datetime.now(timezone.utc),
+                    lastUpdatedAt=datetime.now(timezone.utc),
+                    ttl=60000,
+                )
+                return mcp_types.CreateTaskResult(task=task)
+
+        app = create_mcp_server(
+            FakeStockMasterService(),
+            FakeStockDailyService(),
+            fastmcp_cls=FakeFastMCP,
+            transport="stdio",
+        )
+        experimental = FakeExperimental()
+        fake_ctx = SimpleNamespace(
+            request_id="req-task-ext-1",
+            request_context=SimpleNamespace(experimental=experimental),
+        )
+
+        with patch(
+            "mcp_stock_server.server.ToolDispatcher.dispatch",
+            autospec=True,
+            return_value={"ok": True},
+        ) as dispatch:
+            result = asyncio.run(
+                app.registered["insert_stock_daily_bars_after_close"]("2026-05-26", fake_ctx)
+            )
+
+        self.assertIsInstance(result, mcp_types.CreateTaskResult)
+        self.assertEqual(dispatch.call_count, 1)
+        self.assertIsInstance(experimental.result, mcp_types.CallToolResult)
+
     def test_after_close_tool_falls_back_to_sync_when_client_lacks_task_capability(self):
         from mcp_stock_server.server import create_mcp_server
 

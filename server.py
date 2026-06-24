@@ -36,6 +36,24 @@ TASK_AWARE_TOOLS = {"insert_stock_daily_bars_after_close","get_technical_snapsho
 TASK_EXTENSION_NAME = "io.modelcontextprotocol/tasks"
 
 
+def _client_supports_tasks(experimental: Any) -> bool:
+    if experimental is None:
+        return False
+    if getattr(experimental, "client_supports_tasks", False):
+        return True
+
+    client_caps = getattr(experimental, "_client_capabilities", None)
+    if client_caps is None:
+        return False
+
+    tasks = getattr(client_caps, "tasks", None)
+    if tasks is not None:
+        return True
+
+    extensions = getattr(client_caps, "extensions", None) or {}
+    return TASK_EXTENSION_NAME in extensions
+
+
 def _to_call_tool_result(payload: Any) -> mcp_types.CallToolResult:
     if isinstance(payload, dict):
         text = json.dumps(payload, ensure_ascii=False, indent=2)
@@ -206,7 +224,7 @@ def create_mcp_server(
 
             experimental = getattr(getattr(ctx, "request_context", None), "experimental", None)
             if allow_task_execution and name in TASK_AWARE_TOOLS and experimental is not None:
-                if getattr(experimental, "client_supports_tasks", False):
+                if _client_supports_tasks(experimental):
                     request_id = getattr(ctx, "request_id", None)
                     logger.info(
                         "dispatching tool as task: tool=%s request_id=%s",
