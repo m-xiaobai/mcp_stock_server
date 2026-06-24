@@ -205,24 +205,14 @@ def create_mcp_server(
                 auth_context = build_development_auth_context(registry.list_tools())
 
             experimental = getattr(getattr(ctx, "request_context", None), "experimental", None)
-            if (
-                allow_task_execution
-                and name in TASK_AWARE_TOOLS
-                and experimental is not None
-                and getattr(experimental, "is_task", False)
-            ):
-                if not getattr(experimental, "client_supports_tasks", False):
-                    return error_response(
-                        "task_unsupported",
-                        f"client does not declare task capability for {name}",
-                    )
+            if allow_task_execution and name in TASK_AWARE_TOOLS and experimental is not None:
+                if getattr(experimental, "client_supports_tasks", False):
+                    async def work(task_ctx: Any) -> mcp_types.CallToolResult:
+                        del task_ctx
+                        result = dispatcher.dispatch(name=name, args=args, context=auth_context)
+                        return _to_call_tool_result(result)
 
-                async def work(task_ctx: Any) -> mcp_types.CallToolResult:
-                    del task_ctx
-                    result = dispatcher.dispatch(name=name, args=args, context=auth_context)
-                    return _to_call_tool_result(result)
-
-                return await experimental.run_task(work)
+                    return await experimental.run_task(work)
 
             return dispatcher.dispatch(name=name, args=args, context=auth_context)
         except ToolDispatchError as exc:

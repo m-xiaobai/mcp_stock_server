@@ -329,7 +329,7 @@ class MCPRefactorArchitectureTests(unittest.TestCase):
         self.assertEqual(len(captured_contexts), 1)
         self.assertIn("upsert_stock_daily_bars", captured_contexts[0].approval_grants)
 
-    def test_stdio_task_augmented_after_close_tool_returns_create_task_result(self):
+    def test_after_close_tool_returns_create_task_result_when_client_supports_tasks(self):
         import mcp.types as mcp_types
         from mcp_stock_server.server import create_mcp_server
 
@@ -408,7 +408,7 @@ class MCPRefactorArchitectureTests(unittest.TestCase):
         self.assertEqual(experimental.result.structuredContent, {"ok": True})
         self.assertFalse(experimental.result.isError)
 
-    def test_stdio_task_augmented_after_close_tool_requires_client_task_capability(self):
+    def test_after_close_tool_falls_back_to_sync_when_client_lacks_task_capability(self):
         from mcp_stock_server.server import create_mcp_server
 
         class FakeFastMCP:
@@ -440,10 +440,6 @@ class MCPRefactorArchitectureTests(unittest.TestCase):
 
         class FakeExperimental:
             @property
-            def is_task(self):
-                return True
-
-            @property
             def client_supports_tasks(self):
                 return False
 
@@ -461,14 +457,17 @@ class MCPRefactorArchitectureTests(unittest.TestCase):
             request_context=SimpleNamespace(experimental=FakeExperimental()),
         )
 
-        with patch("mcp_stock_server.server.ToolDispatcher.dispatch", autospec=True) as dispatch:
+        with patch(
+            "mcp_stock_server.server.ToolDispatcher.dispatch",
+            autospec=True,
+            return_value={"ok": True},
+        ) as dispatch:
             result = asyncio.run(
                 app.registered["insert_stock_daily_bars_after_close"]("2026-05-26", fake_ctx)
             )
 
-        self.assertEqual(result["error"]["code"], "task_unsupported")
-        self.assertIn("task capability", result["error"]["message"])
-        self.assertEqual(dispatch.call_count, 0)
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(dispatch.call_count, 1)
 
     def test_real_fastmcp_list_tools_marks_after_close_tool_task_optional(self):
         import importlib.util
