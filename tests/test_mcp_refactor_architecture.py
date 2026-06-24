@@ -400,13 +400,21 @@ class MCPRefactorArchitectureTests(unittest.TestCase):
             autospec=True,
             return_value={"ok": True},
         ) as dispatch:
-            result = asyncio.run(app.registered["insert_stock_daily_bars_after_close"]("2026-05-26", fake_ctx))
+            with self.assertLogs("mcp_stock_server.server", level="INFO") as captured_logs:
+                result = asyncio.run(
+                    app.registered["insert_stock_daily_bars_after_close"]("2026-05-26", fake_ctx)
+                )
 
         self.assertIsInstance(result, mcp_types.CreateTaskResult)
         self.assertEqual(dispatch.call_count, 1)
         self.assertIsInstance(experimental.result, mcp_types.CallToolResult)
         self.assertEqual(experimental.result.structuredContent, {"ok": True})
         self.assertFalse(experimental.result.isError)
+        self.assertTrue(
+            any("dispatching tool as task" in message for message in captured_logs.output)
+        )
+        self.assertTrue(any("task work started" in message for message in captured_logs.output))
+        self.assertTrue(any("task work finished" in message for message in captured_logs.output))
 
     def test_after_close_tool_falls_back_to_sync_when_client_lacks_task_capability(self):
         from mcp_stock_server.server import create_mcp_server

@@ -207,9 +207,25 @@ def create_mcp_server(
             experimental = getattr(getattr(ctx, "request_context", None), "experimental", None)
             if allow_task_execution and name in TASK_AWARE_TOOLS and experimental is not None:
                 if getattr(experimental, "client_supports_tasks", False):
+                    request_id = getattr(ctx, "request_id", None)
+                    logger.info(
+                        "dispatching tool as task: tool=%s request_id=%s",
+                        name,
+                        request_id,
+                    )
+
                     async def work(task_ctx: Any) -> mcp_types.CallToolResult:
-                        del task_ctx
+                        logger.info(
+                            "task work started: tool=%s request_id=%s",
+                            name,
+                            request_id,
+                        )
                         result = dispatcher.dispatch(name=name, args=args, context=auth_context)
+                        logger.info(
+                            "task work finished: tool=%s request_id=%s",
+                            name,
+                            request_id,
+                        )
                         return _to_call_tool_result(result)
 
                     return await experimental.run_task(work)
@@ -359,6 +375,7 @@ def create_mcp_server(
                 "include_bars": include_bars,
             },
             ctx,
+            allow_task_execution=True,
         )
 
     @app.tool(
