@@ -329,7 +329,7 @@ class MCPRefactorArchitectureTests(unittest.TestCase):
         self.assertEqual(len(captured_contexts), 1)
         self.assertIn("upsert_stock_daily_bars", captured_contexts[0].approval_grants)
 
-    def test_after_close_tool_returns_create_task_result_when_client_supports_tasks(self):
+    def test_after_close_tool_returns_create_task_result_when_task_metadata_present(self):
         import mcp.types as mcp_types
         from mcp_stock_server.server import create_mcp_server
 
@@ -363,14 +363,7 @@ class MCPRefactorArchitectureTests(unittest.TestCase):
         class FakeExperimental:
             def __init__(self):
                 self.result = None
-
-            @property
-            def is_task(self):
-                return True
-
-            @property
-            def client_supports_tasks(self):
-                return True
+                self.task_metadata = SimpleNamespace(ttl=60000)
 
             async def run_task(self, work, *args, **kwargs):
                 self.result = await work(SimpleNamespace())
@@ -416,7 +409,7 @@ class MCPRefactorArchitectureTests(unittest.TestCase):
         self.assertTrue(any("task work started" in message for message in captured_logs.output))
         self.assertTrue(any("task work finished" in message for message in captured_logs.output))
 
-    def test_after_close_tool_accepts_extension_declared_task_capability(self):
+    def test_after_close_tool_accepts_task_metadata_even_without_client_capability_flags(self):
         import mcp.types as mcp_types
         from mcp_stock_server.server import create_mcp_server
 
@@ -450,11 +443,8 @@ class MCPRefactorArchitectureTests(unittest.TestCase):
         class FakeExperimental:
             def __init__(self):
                 self.result = None
+                self.task_metadata = SimpleNamespace(ttl=60000)
                 self._client_capabilities = SimpleNamespace(tasks=None, extensions={"io.modelcontextprotocol/tasks": {}})
-
-            @property
-            def client_supports_tasks(self):
-                return False
 
             async def run_task(self, work, *args, **kwargs):
                 self.result = await work(SimpleNamespace())
@@ -492,7 +482,7 @@ class MCPRefactorArchitectureTests(unittest.TestCase):
         self.assertEqual(dispatch.call_count, 1)
         self.assertIsInstance(experimental.result, mcp_types.CallToolResult)
 
-    def test_after_close_tool_falls_back_to_sync_when_client_lacks_task_capability(self):
+    def test_after_close_tool_falls_back_to_sync_when_task_metadata_missing(self):
         from mcp_stock_server.server import create_mcp_server
 
         class FakeFastMCP:
@@ -523,9 +513,7 @@ class MCPRefactorArchitectureTests(unittest.TestCase):
                 )()
 
         class FakeExperimental:
-            @property
-            def client_supports_tasks(self):
-                return False
+            task_metadata = None
 
             async def run_task(self, work, *args, **kwargs):
                 raise AssertionError("run_task should not be called when the client lacks task support")

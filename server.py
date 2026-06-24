@@ -36,29 +36,6 @@ TASK_AWARE_TOOLS = {"insert_stock_daily_bars_after_close","get_technical_snapsho
 TASK_EXTENSION_NAME = "io.modelcontextprotocol/tasks"
 
 
-def _client_supports_tasks(experimental: Any) -> bool:
-    if experimental is None:
-        logger.info("task capability check: experimental missing")
-        return False
-
-    typed_support = bool(getattr(experimental, "client_supports_tasks", False))
-    client_caps = getattr(experimental, "_client_capabilities", None)
-    tasks = getattr(client_caps, "tasks", None) if client_caps is not None else None
-    extensions = (getattr(client_caps, "extensions", None) or {}) if client_caps is not None else {}
-    extension_support = TASK_EXTENSION_NAME in extensions
-    supported = typed_support or tasks is not None or extension_support
-
-    logger.info(
-        "task capability check: typed_support=%s client_caps_present=%s tasks_present=%s extension_support=%s extensions=%s",
-        typed_support,
-        client_caps is not None,
-        tasks is not None,
-        extension_support,
-        sorted(extensions.keys()) if isinstance(extensions, dict) else extensions,
-    )
-    return supported
-
-
 def _to_call_tool_result(payload: Any) -> mcp_types.CallToolResult:
     if isinstance(payload, dict):
         text = json.dumps(payload, ensure_ascii=False, indent=2)
@@ -228,30 +205,38 @@ def create_mcp_server(
                 auth_context = build_development_auth_context(registry.list_tools())
 
             experimental = getattr(getattr(ctx, "request_context", None), "experimental", None)
-            if allow_task_execution and name in TASK_AWARE_TOOLS and experimental is not None:
-                if _client_supports_tasks(experimental):
-                    request_id = getattr(ctx, "request_id", None)
+            task_metadata = getattr(experimental, "task_metadata", None) if experimental is not None else None
+            logger.info(
+                "task routing gate: tool=%s allow_task_execution=%s in_task_aware=%s experimental=%s task_metadata_present=%s",
+                name,
+                allow_task_execution,
+                name in TASK_AWARE_TOOLS,
+                experimental is not None,
+                task_metadata is not None,
+            )
+            if allow_task_execution and name in TASK_AWARE_TOOLS and experimental is not None and task_metadata is not None:
+                request_id = getattr(ctx, "request_id", None)
+                logger.info(
+                    "dispatching tool as task: tool=%s request_id=%s",
+                    name,
+                    request_id,
+                )
+
+                async def work(task_ctx: Any) -> mcp_types.CallToolResult:
                     logger.info(
-                        "dispatching tool as task: tool=%s request_id=%s",
+                        "task work started: tool=%s request_id=%s",
                         name,
                         request_id,
                     )
+                    result = dispatcher.dispatch(name=name, args=args, context=auth_context)
+                    logger.info(
+                        "task work finished: tool=%s request_id=%s",
+                        name,
+                        request_id,
+                    )
+                    return _to_call_tool_result(result)
 
-                    async def work(task_ctx: Any) -> mcp_types.CallToolResult:
-                        logger.info(
-                            "task work started: tool=%s request_id=%s",
-                            name,
-                            request_id,
-                        )
-                        result = dispatcher.dispatch(name=name, args=args, context=auth_context)
-                        logger.info(
-                            "task work finished: tool=%s request_id=%s",
-                            name,
-                            request_id,
-                        )
-                        return _to_call_tool_result(result)
-
-                    return await experimental.run_task(work)
+                return await experimental.run_task(work)
 
             return dispatcher.dispatch(name=name, args=args, context=auth_context)
         except ToolDispatchError as exc:
