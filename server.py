@@ -38,20 +38,25 @@ TASK_EXTENSION_NAME = "io.modelcontextprotocol/tasks"
 
 def _client_supports_tasks(experimental: Any) -> bool:
     if experimental is None:
+        logger.info("task capability check: experimental missing")
         return False
-    if getattr(experimental, "client_supports_tasks", False):
-        return True
 
+    typed_support = bool(getattr(experimental, "client_supports_tasks", False))
     client_caps = getattr(experimental, "_client_capabilities", None)
-    if client_caps is None:
-        return False
+    tasks = getattr(client_caps, "tasks", None) if client_caps is not None else None
+    extensions = (getattr(client_caps, "extensions", None) or {}) if client_caps is not None else {}
+    extension_support = TASK_EXTENSION_NAME in extensions
+    supported = typed_support or tasks is not None or extension_support
 
-    tasks = getattr(client_caps, "tasks", None)
-    if tasks is not None:
-        return True
-
-    extensions = getattr(client_caps, "extensions", None) or {}
-    return TASK_EXTENSION_NAME in extensions
+    logger.info(
+        "task capability check: typed_support=%s client_caps_present=%s tasks_present=%s extension_support=%s extensions=%s",
+        typed_support,
+        client_caps is not None,
+        tasks is not None,
+        extension_support,
+        sorted(extensions.keys()) if isinstance(extensions, dict) else extensions,
+    )
+    return supported
 
 
 def _to_call_tool_result(payload: Any) -> mcp_types.CallToolResult:
