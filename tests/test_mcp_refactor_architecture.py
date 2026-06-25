@@ -7,7 +7,7 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 
 class MCPRefactorArchitectureTests(unittest.TestCase):
@@ -363,7 +363,11 @@ class MCPRefactorArchitectureTests(unittest.TestCase):
         class FakeExperimental:
             def __init__(self):
                 self.result = None
+                self.is_task = True
                 self.task_metadata = SimpleNamespace(ttl=60000)
+
+            def validate_task_mode(self, mode, *, raise_error=True):
+                return None
 
             async def run_task(self, work, *args, **kwargs):
                 self.result = await work(SimpleNamespace())
@@ -443,8 +447,12 @@ class MCPRefactorArchitectureTests(unittest.TestCase):
         class FakeExperimental:
             def __init__(self):
                 self.result = None
+                self.is_task = True
                 self.task_metadata = SimpleNamespace(ttl=60000)
                 self._client_capabilities = SimpleNamespace(tasks=None, extensions={"io.modelcontextprotocol/tasks": {}})
+
+            def validate_task_mode(self, mode, *, raise_error=True):
+                return None
 
             async def run_task(self, work, *args, **kwargs):
                 self.result = await work(SimpleNamespace())
@@ -513,7 +521,11 @@ class MCPRefactorArchitectureTests(unittest.TestCase):
                 )()
 
         class FakeExperimental:
+            is_task = False
             task_metadata = None
+
+            def validate_task_mode(self, mode, *, raise_error=True):
+                return None
 
             async def run_task(self, work, *args, **kwargs):
                 raise AssertionError("run_task should not be called when the client lacks task support")
@@ -540,6 +552,157 @@ class MCPRefactorArchitectureTests(unittest.TestCase):
 
         self.assertEqual(result, {"ok": True})
         self.assertEqual(dispatch.call_count, 1)
+
+    def test_real_fastmcp_call_tool_skips_conversion_for_task_aware_task_requests(self):
+        import mcp.types as mcp_types
+        from mcp_stock_server.server import create_mcp_server
+
+        class FakeStockMasterService:
+            def list_stock_codes(self):
+                return []
+
+        class FakeStockDailyService:
+            def get_stock_daily_bars(self, time, codes, limit=120):
+                return type("Response", (), {"time": time, "items": []})()
+
+            def upsert_stock_daily_bars(self, request):
+                return type(
+                    "Response",
+                    (),
+                    {"time": request.time, "total": 1, "success": 1, "failed": 0, "errors": []},
+                )()
+
+        app = create_mcp_server(
+            FakeStockMasterService(),
+            FakeStockDailyService(),
+            transport="stdio",
+        )
+        class FakeExperimental:
+            is_task = True
+            task_metadata = SimpleNamespace(ttl=60000)
+
+            def validate_task_mode(self, mode, *, raise_error=True):
+                return None
+
+        fake_context = SimpleNamespace(
+            request_context=SimpleNamespace(experimental=FakeExperimental())
+        )
+        task_result = mcp_types.CreateTaskResult(
+            task=mcp_types.Task(
+                taskId="task-fastmcp-1",
+                status=mcp_types.TASK_STATUS_WORKING,
+                createdAt=datetime.now(timezone.utc),
+                lastUpdatedAt=datetime.now(timezone.utc),
+                ttl=60000,
+            )
+        )
+
+        with patch.object(app, "get_context", return_value=fake_context):
+            with patch.object(app._tool_manager, "call_tool", new_callable=AsyncMock) as call_tool:
+                call_tool.return_value = task_result
+
+                result = asyncio.run(
+                    app.call_tool(
+                        "get_technical_snapshot",
+                        {"symbols": ["000001.SZ"], "trade_date": "2026-06-25"},
+                    )
+                )
+
+        self.assertIs(result, task_result)
+        self.assertEqual(call_tool.await_count, 1)
+        _, kwargs = call_tool.await_args
+        self.assertIs(kwargs["context"], fake_context)
+        self.assertFalse(kwargs["convert_result"])
+
+    def test_real_fastmcp_call_tool_keeps_conversion_for_non_task_requests(self):
+        from mcp_stock_server.server import create_mcp_server
+
+        class FakeStockMasterService:
+            def list_stock_codes(self):
+                return []
+
+        class FakeStockDailyService:
+            def get_stock_daily_bars(self, time, codes, limit=120):
+                return type("Response", (), {"time": time, "items": []})()
+
+            def upsert_stock_daily_bars(self, request):
+                return type(
+                    "Response",
+                    (),
+                    {"time": request.time, "total": 1, "success": 1, "failed": 0, "errors": []},
+                )()
+
+        app = create_mcp_server(
+            FakeStockMasterService(),
+            FakeStockDailyService(),
+            transport="stdio",
+        )
+        fake_context = SimpleNamespace(
+            request_context=SimpleNamespace(experimental=SimpleNamespace(is_task=False))
+        )
+
+        with patch.object(app, "get_context", return_value=fake_context):
+            with patch.object(app._tool_manager, "call_tool", new_callable=AsyncMock) as call_tool:
+                call_tool.return_value = {"ok": True}
+
+                result = asyncio.run(
+                    app.call_tool(
+                        "get_technical_snapshot",
+                        {"symbols": ["000001.SZ"], "trade_date": "2026-06-25"},
+                    )
+                )
+
+        self.assertEqual(result, {"ok": True})
+        _, kwargs = call_tool.await_args
+        self.assertTrue(kwargs["convert_result"])
+
+    def test_real_fastmcp_call_tool_keeps_conversion_when_task_mode_validation_fails(self):
+        from mcp_stock_server.server import create_mcp_server
+
+        class FakeStockMasterService:
+            def list_stock_codes(self):
+                return []
+
+        class FakeStockDailyService:
+            def get_stock_daily_bars(self, time, codes, limit=120):
+                return type("Response", (), {"time": time, "items": []})()
+
+            def upsert_stock_daily_bars(self, request):
+                return type(
+                    "Response",
+                    (),
+                    {"time": request.time, "total": 1, "success": 1, "failed": 0, "errors": []},
+                )()
+
+        class FakeExperimental:
+            is_task = True
+            task_metadata = SimpleNamespace(ttl=60000)
+
+            def validate_task_mode(self, mode, *, raise_error=True):
+                return object()
+
+        app = create_mcp_server(
+            FakeStockMasterService(),
+            FakeStockDailyService(),
+            transport="stdio",
+        )
+        fake_context = SimpleNamespace(
+            request_context=SimpleNamespace(experimental=FakeExperimental())
+        )
+
+        with patch.object(app, "get_context", return_value=fake_context):
+            with patch.object(app._tool_manager, "call_tool", new_callable=AsyncMock) as call_tool:
+                call_tool.return_value = {"ok": True}
+
+                asyncio.run(
+                    app.call_tool(
+                        "get_technical_snapshot",
+                        {"symbols": ["000001.SZ"], "trade_date": "2026-06-25"},
+                    )
+                )
+
+        _, kwargs = call_tool.await_args
+        self.assertTrue(kwargs["convert_result"])
 
     def test_real_fastmcp_list_tools_marks_after_close_tool_task_optional(self):
         import importlib.util

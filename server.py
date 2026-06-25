@@ -56,6 +56,32 @@ def _to_call_tool_result(payload: Any) -> mcp_types.CallToolResult:
     )
 
 
+def _should_convert_fastmcp_result(ctx: Context, tool_name: str) -> bool:
+    request_context = getattr(ctx, "request_context", None)
+    experimental = getattr(request_context, "experimental", None) if request_context is not None else None
+    return not _is_task_request_for_tool(experimental, tool_name)
+
+
+def _is_task_request_for_tool(experimental: Any, tool_name: str) -> bool:
+    if experimental is None or tool_name not in TASK_AWARE_TOOLS:
+        return False
+
+    is_task_request = bool(getattr(experimental, "is_task", False))
+    if not is_task_request:
+        return False
+
+    validate_task_mode = getattr(experimental, "validate_task_mode", None)
+    if callable(validate_task_mode):
+        validation_error = validate_task_mode(
+            mcp_types.TASK_OPTIONAL,
+            raise_error=False,
+        )
+        if validation_error is not None:
+            return False
+
+    return getattr(experimental, "task_metadata", None) is not None
+
+
 def _build_fastmcp_app(
     fastmcp_cls: type[Any],
     *,
@@ -124,6 +150,22 @@ def create_mcp_server(
             return options
 
         app._mcp_server.create_initialization_options = create_initialization_options_with_tasks
+    if hasattr(app, "_tool_manager"):
+        async def call_tool_with_task_passthrough(
+            name: str,
+            arguments: dict[str, Any],
+        ) -> Any:
+            context = app.get_context()
+            convert_result = _should_convert_fastmcp_result(context, name)
+            return await app._tool_manager.call_tool(
+                name,
+                arguments,
+                context=context,
+                convert_result=convert_result,
+            )
+
+        app.call_tool = call_tool_with_task_passthrough
+        app._mcp_server.call_tool(validate_input=False)(app.call_tool)
     registry = build_stock_tool_registry(stock_master_service, stock_daily_service)
     dispatcher = ToolDispatcher(
         registry=registry,
@@ -206,15 +248,17 @@ def create_mcp_server(
 
             experimental = getattr(getattr(ctx, "request_context", None), "experimental", None)
             task_metadata = getattr(experimental, "task_metadata", None) if experimental is not None else None
+            is_task_request = _is_task_request_for_tool(experimental, name)
             logger.info(
-                "task routing gate: tool=%s allow_task_execution=%s in_task_aware=%s experimental=%s task_metadata_present=%s",
+                "task routing gate: tool=%s allow_task_execution=%s in_task_aware=%s experimental=%s is_task_request=%s task_metadata_present=%s",
                 name,
                 allow_task_execution,
                 name in TASK_AWARE_TOOLS,
                 experimental is not None,
+                is_task_request,
                 task_metadata is not None,
             )
-            if allow_task_execution and name in TASK_AWARE_TOOLS and experimental is not None and task_metadata is not None:
+            if allow_task_execution and is_task_request:
                 request_id = getattr(ctx, "request_id", None)
                 logger.info(
                     "dispatching tool as task: tool=%s request_id=%s",
