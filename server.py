@@ -10,6 +10,8 @@ import mcp.types as mcp_types
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.server import Context
 from mcp.server.auth.middleware.auth_context import get_access_token
+from mcp.shared.experimental.tasks.message_queue import InMemoryTaskMessageQueue, TaskMessageQueue
+from mcp.shared.experimental.tasks.store import TaskStore
 
 from .audit.writer import JsonlAuditWriter
 from .auth.approval import InMemoryApprovalChecker
@@ -127,6 +129,8 @@ def create_mcp_server(
     port: int = 8000,
     streamable_http_path: str = "/mcp",
     auth_config: MCPAuthConfig | None = None,
+    task_store: TaskStore | None = None,
+    task_queue: TaskMessageQueue | None = None,
 ):
     app = _build_fastmcp_app(
         fastmcp_cls,
@@ -138,7 +142,13 @@ def create_mcp_server(
         auth_config=auth_config,
     )
     if hasattr(app, "_mcp_server") and hasattr(app._mcp_server, "experimental"):
-        app._mcp_server.experimental.enable_tasks()
+        enable_tasks_kwargs: dict[str, Any] = {}
+        if task_store is not None:
+            enable_tasks_kwargs["store"] = task_store
+            enable_tasks_kwargs["queue"] = task_queue or InMemoryTaskMessageQueue()
+        elif task_queue is not None:
+            enable_tasks_kwargs["queue"] = task_queue
+        app._mcp_server.experimental.enable_tasks(**enable_tasks_kwargs)
         original_create_initialization_options = app._mcp_server.create_initialization_options
 
         def create_initialization_options_with_tasks(*args: Any, **kwargs: Any):
@@ -475,12 +485,17 @@ def run_stdio_server(
     stock_master_service: StockMasterService,
     stock_daily_service: StockDailyService,
     fastmcp_cls: type[Any] = FastMCP,
+    *,
+    task_store: TaskStore | None = None,
+    task_queue: TaskMessageQueue | None = None,
 ) -> None:
     app = create_mcp_server(
         stock_master_service=stock_master_service,
         stock_daily_service=stock_daily_service,
         fastmcp_cls=fastmcp_cls,
         transport="stdio",
+        task_store=task_store,
+        task_queue=task_queue,
     )
     logger.info("mcp-stock-server ready on stdio")
     app.run(transport="stdio")
@@ -495,6 +510,8 @@ def run_streamable_http_server(
     port: int = 8000,
     streamable_http_path: str = "/mcp",
     auth_config: MCPAuthConfig | None = None,
+    task_store: TaskStore | None = None,
+    task_queue: TaskMessageQueue | None = None,
 ) -> None:
     app = create_mcp_server(
         stock_master_service=stock_master_service,
@@ -505,6 +522,8 @@ def run_streamable_http_server(
         port=port,
         streamable_http_path=streamable_http_path,
         auth_config=auth_config,
+        task_store=task_store,
+        task_queue=task_queue,
     )
     logger.info(
         "mcp-stock-server ready on streamable-http http://%s:%s%s",

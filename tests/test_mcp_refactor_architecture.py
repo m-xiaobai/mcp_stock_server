@@ -782,6 +782,108 @@ class MCPRefactorArchitectureTests(unittest.TestCase):
         self.assertIsNotNone(capabilities.tasks.requests.tools.call)
         self.assertIn("io.modelcontextprotocol/tasks", capabilities.extensions)
 
+    def test_create_mcp_server_passes_custom_task_store_to_enable_tasks(self):
+        from mcp.shared.experimental.tasks.message_queue import InMemoryTaskMessageQueue
+        from mcp.shared.experimental.tasks.store import TaskStore
+        from mcp_stock_server.server import create_mcp_server
+
+        class FakeExperimental:
+            def __init__(self):
+                self.calls = []
+
+            def enable_tasks(self, **kwargs):
+                self.calls.append(kwargs)
+
+        class FakeLowLevelServer:
+            def __init__(self):
+                self.experimental = FakeExperimental()
+
+            def create_initialization_options(self, *args, **kwargs):
+                return SimpleNamespace(capabilities=SimpleNamespace(extensions={}))
+
+            def list_tools(self):
+                def decorator(func):
+                    return func
+
+                return decorator
+
+            def call_tool(self, validate_input=False):
+                def decorator(func):
+                    return func
+
+                return decorator
+
+        class FakeFastMCP:
+            def __init__(self, name, **kwargs):
+                self.name = name
+                self.registered = {}
+                self._mcp_server = FakeLowLevelServer()
+
+            def tool(self, name=None, description=None):
+                def decorator(func):
+                    self.registered[name or func.__name__] = func
+                    return func
+
+                return decorator
+
+            async def list_tools(self):
+                return []
+
+        class FakeStockMasterService:
+            def list_stock_codes(self):
+                return []
+
+        class FakeStockDailyService:
+            def get_stock_daily_bars(self, time, codes, limit=120):
+                return type("Response", (), {"time": time, "items": []})()
+
+            def upsert_stock_daily_bars(self, request):
+                return type(
+                    "Response",
+                    (),
+                    {"time": request.time, "total": 0, "success": 0, "failed": 0, "errors": []},
+                )()
+
+        class DummyTaskStore(TaskStore):
+            async def create_task(self, metadata, task_id=None):
+                raise NotImplementedError
+
+            async def get_task(self, task_id):
+                raise NotImplementedError
+
+            async def update_task(self, task_id, status=None, status_message=None):
+                raise NotImplementedError
+
+            async def store_result(self, task_id, result):
+                raise NotImplementedError
+
+            async def get_result(self, task_id):
+                raise NotImplementedError
+
+            async def list_tasks(self, cursor=None):
+                raise NotImplementedError
+
+            async def delete_task(self, task_id):
+                raise NotImplementedError
+
+            async def wait_for_update(self, task_id):
+                raise NotImplementedError
+
+            async def notify_update(self, task_id):
+                raise NotImplementedError
+
+        custom_store = DummyTaskStore()
+        app = create_mcp_server(
+            FakeStockMasterService(),
+            FakeStockDailyService(),
+            fastmcp_cls=FakeFastMCP,
+            task_store=custom_store,
+        )
+
+        self.assertEqual(len(app._mcp_server.experimental.calls), 1)
+        self.assertIs(app._mcp_server.experimental.calls[0]["store"], custom_store)
+        self.assertIsInstance(app._mcp_server.experimental.calls[0]["queue"], InMemoryTaskMessageQueue)
+
     def test_stock_tool_registry_exposes_metadata_and_destructive_flags(self):
         from mcp_stock_server.tooling.stock_tools import build_stock_tool_registry
 

@@ -27,10 +27,10 @@
 
 V1 明确限制为：
 
-- 只试点一个工具：`insert_stock_daily_bars_after_close`
+- 试点两个工具：`insert_stock_daily_bars_after_close` 与 `get_technical_snapshot`
 - 使用 SDK 默认 `InMemoryTaskStore`
 - 不做任务持久化
-- 不做多工具 task 化
+- 暂不继续扩大 task-aware 工具范围
 - 不做任务通知增强的专项设计
 
 ## 背景与目标
@@ -52,7 +52,7 @@ V1 明确限制为：
 
 - 让 `mcp_stock_server` 支持官方 Tasks 扩展
 - 保持现有工具同步能力不回归
-- 在最小改动下让单个长工具具备 task-aware 能力
+- 在最小改动下让少量长工具具备 task-aware 能力
 
 ## 当前现状
 
@@ -97,25 +97,26 @@ V1 直接启用 SDK 自带的 experimental tasks，而不是自定义底层 JSON
 - 可以显著降低自实现协议面的复杂度
 - 能让实现更贴近官方扩展语义
 
-### 2. V1 只 task 化 `insert_stock_daily_bars_after_close`
+### 2. V1 task 化两个长工具
 
-V1 只选择一个长工具进行试点：
+V1 当前选择两个长工具进行试点：
 
 - `insert_stock_daily_bars_after_close`
+- `get_technical_snapshot`
 
 不在 V1 中 task 化以下工具：
 
 - `get_stock_daily_bars`
 - `list_stock_codes`
 - `screen_b1_stocks`
-- `get_technical_snapshot`
 
 原因：
 
 - `insert_stock_daily_bars_after_close` 已具备明显长任务特征
+- `get_technical_snapshot` 也可能因多标的计算与日线查询成为长请求
 - 涉及抓取与写入，比普通查询更适合 Tasks
 - 可以验证异步执行、状态查询和结果提取的完整链路
-- 将改动面控制在最小范围内
+- 将改动面控制在少量工具范围内
 
 ### 3. 使用 `InMemoryTaskStore`
 
@@ -167,7 +168,10 @@ V1 不将所有工具统一为 task 模式，而是采用双模式：
 
 ### 2. task-aware 调用分流
 
-V1 中，`insert_stock_daily_bars_after_close` 需要支持两条执行路径：
+V1 中，以下工具需要支持两条执行路径：
+
+- `insert_stock_daily_bars_after_close`
+- `get_technical_snapshot`
 
 #### A. 普通同步调用
 
@@ -178,7 +182,7 @@ V1 中，`insert_stock_daily_bars_after_close` 需要支持两条执行路径：
 
 #### B. task-augmented 调用
 
-客户端在初始化时声明 `capabilities.tasks`，并以 task-augmented request 调用工具时：
+当 SDK 在当前请求上下文中识别到 task request，并且该工具被标记为 task-aware 时：
 
 - 工具不立即执行到底并返回 payload
 - 使用 `ctx.request_context.experimental.run_task(...)`
@@ -196,27 +200,37 @@ V1 中，`insert_stock_daily_bars_after_close` 需要支持两条执行路径：
 }
 ```
 
-在当前 Python SDK 里，这个声明会映射为 `ClientCapabilities.tasks`。
+在当前实现里，服务端实际依赖的是 SDK 暴露的 task request 上下文信号，例如：
+
+- `experimental.is_task`
+- `experimental.validate_task_mode(...)`
+- `experimental.task_metadata`
+
+也就是说，task 路径的实际进入条件是“当前请求已被 SDK 识别为 task request 且带有 task metadata”，而不是在业务代码里单独解析客户端 capability 字段。
 
 后台 `work` 函数负责：
 
 - 调用现有 service 逻辑
-- 更新任务状态
 - 最终返回与同步工具一致的结果结构
 
 ### 3. 任务状态更新
 
-V1 的 `work` 函数中应使用 `ServerTaskContext` 进行状态更新，例如：
+当前实现尚未在 `work` 函数中使用 `ServerTaskContext` 做细粒度状态更新。
+
+当前已落地的行为是：
+
+- 通过 SDK task store 托管任务生命周期
+- 在服务端日志中记录 task start / finish
+- 最终通过 `tasks/result` 返回结构化结果
+
+尚未落地的能力包括：
 
 - `正在拉取股票列表`
 - `正在抓取当日日线`
 - `正在写入数据库`
 - `任务完成`
 
-失败时：
-
-- 任务标记为 failed
-- 错误信息进入任务状态，而不是只作为同步异常抛出
+这些更细的进度文案和基于 `ServerTaskContext` 的状态推送，仍属于后续可增强项，而不是当前 V1 已实现内容。
 
 ### 4. 结果结构保持兼容
 
@@ -278,9 +292,10 @@ V1 先沿用现有请求级审计链路。
 
 ## 接口与行为约束
 
-V1 的公共行为变化只发生在：
+V1 的公共行为变化当前发生在：
 
 - `insert_stock_daily_bars_after_close`
+- `get_technical_snapshot`
 
 同时，`get_capability_manifest` 会补充本地摘要字段：
 
@@ -292,8 +307,8 @@ V1 的公共行为变化只发生在：
 
 客户端约束：
 
-- 只有声明 `capabilities.tasks` 的客户端，才能走 task-augmented 路径
-- 不支持 Tasks 的客户端继续走同步工具模式
+- 能被 SDK 识别为 task request 的调用，会在 task-aware 工具上走 task-augmented 路径
+- 其他调用继续走同步工具模式
 
 V1 明确约束：
 
@@ -309,17 +324,17 @@ V1 需要至少覆盖以下场景：
 
 - 启用 tasks 后，`ServerCapabilities.tasks` 能正确暴露 tasks 支持
 
-### 2. 单工具 task 化
+### 2. 少量工具 task 化
 
 - `insert_stock_daily_bars_after_close` 在普通调用下仍同步返回结果
 - 同一工具在 task-augmented 调用下返回 `CreateTaskResult`
+- `get_technical_snapshot` 作为 task-aware 工具出现在 capability / tool metadata 中
 
 ### 3. 任务生命周期
 
-- `tasks/get` 能查询任务状态
-- `tasks/result` 能在完成后返回结果
-- `tasks/list` 能列出当前任务
-- `tasks/cancel` 能对运行中任务生效
+- 启用 tasks 后，SDK 提供 `tasks/get` / `tasks/result` / `tasks/list` / `tasks/cancel`
+- 当前仓库测试已覆盖 capability 暴露、task result 返回和 task-aware tool metadata
+- 当前仓库内尚未补齐对 `tasks/get` / `tasks/result` / `tasks/list` / `tasks/cancel` 的端到端显式测试
 
 ### 4. 回归验证
 
@@ -332,7 +347,7 @@ V1 明确不包含以下内容：
 
 - MySQL 持久化任务表
 - 自定义 `TaskStore`
-- 多工具同时 task 化
+- 更多工具的 task 化
 - 专项实现 `notifications/tasks/status` 增强链路
 - 任务跨重启恢复
 - 任务级审计体系
@@ -354,6 +369,6 @@ V1 明确不包含以下内容：
 
 - 复用 SDK 已有的 experimental tasks 能力
 - 在当前 `FastMCP + ToolDispatcher` 架构上增加 task-aware 工具路径
-- 用单工具、内存 store 的最小方案先跑通官方扩展链路
+- 用少量工具、内存 store 的最小方案先跑通官方扩展链路
 
-这样可以在不显著扩大改动面的前提下，让 `mcp_stock_server` 具备第一版 MCP Tasks 支持能力，并为后续任务持久化、多工具迁移和输入中断式交互打下基础。
+这样可以在不显著扩大改动面的前提下，让 `mcp_stock_server` 具备第一版 MCP Tasks 支持能力，并为后续任务持久化、更多工具迁移和输入中断式交互打下基础。

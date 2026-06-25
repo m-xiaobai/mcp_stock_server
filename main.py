@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import sys
+import anyio
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Callable
@@ -17,6 +18,7 @@ if __package__ in (None, ""):
 
     from mcp_stock_server.auth.oauth import MCPAuthConfig
     from mcp_stock_server.db import MySQLConfig, create_pymysql_connection
+    from mcp_stock_server.repositories import MySQLTaskStore
     from mcp_stock_server.repositories.stock_daily_repository import (
         InMemoryStockDailyRepository,
         MySQLStockDailyRepository,
@@ -29,6 +31,7 @@ if __package__ in (None, ""):
 else:
     from .auth.oauth import MCPAuthConfig
     from .db import MySQLConfig, create_pymysql_connection
+    from .repositories import MySQLTaskStore
     from .repositories.stock_daily_repository import (
         InMemoryStockDailyRepository,
         MySQLStockDailyRepository,
@@ -49,6 +52,7 @@ class MCPRuntimeConfig:
     host: str = "127.0.0.1"
     port: int = 8000
     streamable_http_path: str = "/mcp"
+    task_store_backend: str = "memory"
     auth: MCPAuthConfig = field(default_factory=MCPAuthConfig)
 
     @classmethod
@@ -62,6 +66,7 @@ class MCPRuntimeConfig:
             host=str(mcp_payload.get("host", "127.0.0.1")),
             port=int(mcp_payload.get("port", 8000)),
             streamable_http_path=str(mcp_payload.get("streamable_http_path", "/mcp")),
+            task_store_backend=str(mcp_payload.get("tasks", {}).get("store_backend", "memory")),
             auth=MCPAuthConfig(
                 enabled=bool(auth_payload.get("enabled", False)),
                 mode=auth_payload.get("mode"),
@@ -115,6 +120,25 @@ def build_mysql_services(
     )
 
 
+def build_task_store(
+    runtime_config: MCPRuntimeConfig,
+    mysql_config: MySQLConfig,
+    connection_factory_builder: Callable[[MySQLConfig], Callable[[], object]] | None = None,
+):
+    if runtime_config.task_store_backend != "mysql":
+        return None
+
+    if connection_factory_builder is None:
+
+        def connection_factory_builder(current_config: MySQLConfig) -> Callable[[], object]:
+            return lambda: create_pymysql_connection(current_config)
+
+    store = MySQLTaskStore(connection_factory_builder(mysql_config))
+    anyio.run(store.ensure_schema)
+    anyio.run(store.reconcile_orphaned_tasks)
+    return store
+
+
 if __name__ == "__main__":
     logging.basicConfig(
         level=logging.INFO,
@@ -126,8 +150,11 @@ if __name__ == "__main__":
     else:
         from .server import run_stdio_server, run_streamable_http_server
     logger.info("Starting MCP Stock Server")
-    stock_master_service, stock_daily_service = build_mysql_services()
-    runtime_config = MCPRuntimeConfig.from_file(Path(__file__).with_name("config.json"))
+    config_path = Path(__file__).with_name("config.json")
+    mysql_config = MySQLConfig.from_file(config_path)
+    stock_master_service, stock_daily_service = build_mysql_services(config=mysql_config)
+    runtime_config = MCPRuntimeConfig.from_file(config_path)
+    task_store = build_task_store(runtime_config, mysql_config)
     transport = runtime_config.transport
     if len(sys.argv) > 1:
         transport = sys.argv[1]
@@ -139,7 +166,8 @@ if __name__ == "__main__":
             port=runtime_config.port,
             streamable_http_path=runtime_config.streamable_http_path,
             auth_config=runtime_config.auth,
+            task_store=task_store,
         )
     else:
-        run_stdio_server(stock_master_service, stock_daily_service)
+        run_stdio_server(stock_master_service, stock_daily_service, task_store=task_store)
     logger.info("MCP Stock Server running")

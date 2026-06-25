@@ -17,3 +17,5 @@ docs/audit/
 config.local.json
 
 .vscode
+
+.codegraph

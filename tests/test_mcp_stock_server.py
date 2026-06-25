@@ -7,6 +7,7 @@ from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 
 class MCPStockServerTests(unittest.TestCase):
@@ -46,6 +47,37 @@ class MCPStockServerTests(unittest.TestCase):
         self.assertEqual(config.host, "127.0.0.1")
         self.assertEqual(config.port, 9001)
         self.assertEqual(config.streamable_http_path, "/stocks-mcp")
+
+    def test_mcp_runtime_config_defaults_task_store_backend_to_memory(self):
+        from mcp_stock_server.main import MCPRuntimeConfig
+
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "config.json"
+            path.write_text(
+                '{"mysql":{"host":"127.0.0.1","port":3306,"user":"u","password":"p","database":"stocks"}}',
+                encoding="utf-8",
+            )
+
+            config = MCPRuntimeConfig.from_file(path)
+
+        self.assertEqual(config.task_store_backend, "memory")
+
+    def test_mcp_runtime_config_loads_task_store_backend_from_file(self):
+        from mcp_stock_server.main import MCPRuntimeConfig
+
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "config.json"
+            path.write_text(
+                (
+                    '{"mysql":{"host":"127.0.0.1","port":3306,"user":"u","password":"p","database":"stocks"},'
+                    '"mcp":{"tasks":{"store_backend":"mysql"}}}'
+                ),
+                encoding="utf-8",
+            )
+
+            config = MCPRuntimeConfig.from_file(path)
+
+        self.assertEqual(config.task_store_backend, "mysql")
 
     def test_upsert_request_rejects_mismatched_trade_date(self):
         from mcp_stock_server.models.request_models import UpsertStockDailyBarsRequest
@@ -1213,6 +1245,56 @@ class MCPStockServerTests(unittest.TestCase):
         self.assertIsInstance(stock_master_service.stock_master_repository, MySQLStockMasterRepository)
         self.assertIsInstance(stock_daily_service.stock_master_repository, MySQLStockMasterRepository)
         self.assertIsInstance(stock_daily_service.stock_daily_repository, MySQLStockDailyRepository)
+
+    def test_build_task_store_returns_none_for_memory_backend(self):
+        from mcp_stock_server.db.mysql import MySQLConfig
+        from mcp_stock_server.main import MCPRuntimeConfig, build_task_store
+
+        runtime_config = MCPRuntimeConfig(task_store_backend="memory")
+        mysql_config = MySQLConfig(
+            host="127.0.0.1",
+            port=3306,
+            user="u",
+            password="p",
+            database="stocks",
+        )
+
+        self.assertIsNone(build_task_store(runtime_config, mysql_config))
+
+    def test_build_task_store_initializes_mysql_backend(self):
+        from mcp_stock_server.db.mysql import MySQLConfig
+        from mcp_stock_server.main import MCPRuntimeConfig, build_task_store
+
+        runtime_config = MCPRuntimeConfig(task_store_backend="mysql")
+        mysql_config = MySQLConfig(
+            host="127.0.0.1",
+            port=3306,
+            user="u",
+            password="p",
+            database="stocks",
+        )
+
+        class FakeTaskStore:
+            instances = []
+
+            def __init__(self, connection_factory):
+                self.connection_factory = connection_factory
+                self.ensure_schema_called = 0
+                self.reconcile_called = 0
+                FakeTaskStore.instances.append(self)
+
+            async def ensure_schema(self):
+                self.ensure_schema_called += 1
+
+            async def reconcile_orphaned_tasks(self):
+                self.reconcile_called += 1
+
+        with patch("mcp_stock_server.main.MySQLTaskStore", FakeTaskStore):
+            store = build_task_store(runtime_config, mysql_config)
+
+        self.assertIs(store, FakeTaskStore.instances[0])
+        self.assertEqual(store.ensure_schema_called, 1)
+        self.assertEqual(store.reconcile_called, 1)
 
     def test_stock_master_service_initializes_master_rows(self):
         from mcp_stock_server.models.db_models import StockCodeItem
