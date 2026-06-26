@@ -3,9 +3,12 @@ from __future__ import annotations
 import json
 import logging
 import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
+import anyio
 import mcp.types as mcp_types
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.server import Context
@@ -15,7 +18,7 @@ from mcp.shared.experimental.tasks.store import TaskStore
 
 from .audit.writer import JsonlAuditWriter
 from .auth.approval import InMemoryApprovalChecker
-from .auth.context import build_development_auth_context, build_runtime_auth_context
+from .auth.context import AuthContext, build_development_auth_context, build_runtime_auth_context
 from .auth.elicitation import (
     DestructiveApprovalForm,
     build_destructive_approval_message,
@@ -28,6 +31,7 @@ from .manifest.capabilities import build_capability_manifest
 from .protocol.dispatcher import ToolDispatcher
 from .protocol.errors import ToolDispatchError
 from .protocol.response import error_response
+from .recovery import RecoveryTaskRecord, TaskRecoveryCoordinator
 from .services import StockDailyService, StockMasterService
 from .tooling.stock_tools import build_stock_tool_registry
 
@@ -131,6 +135,8 @@ def create_mcp_server(
     auth_config: MCPAuthConfig | None = None,
     task_store: TaskStore | None = None,
     task_queue: TaskMessageQueue | None = None,
+    recovery_enabled: bool = True,
+    recovery_coordinator: TaskRecoveryCoordinator | None = None,
 ):
     app = _build_fastmcp_app(
         fastmcp_cls,
@@ -186,6 +192,29 @@ def create_mcp_server(
         redactor=Redactor(),
     )
     definitions = {definition.name: definition for definition in registry.list_tools()}
+
+    async def execute_recovery_record(record: RecoveryTaskRecord) -> mcp_types.CallToolResult:
+        auth_context = AuthContext(
+            user_id=record.user_id,
+            tenant_id=record.tenant_id,
+            scopes=set(record.scopes),
+            approval_grants=set(record.approval_grants),
+            request_id=f"replay-{record.task_id}",
+        )
+        result = dispatcher.dispatch(name=record.tool_name, args=record.tool_args, context=auth_context)
+        return _to_call_tool_result(result)
+
+    if (
+        recovery_enabled
+        and recovery_coordinator is None
+        and task_store is not None
+        and hasattr(task_store, "register_task_definition")
+    ):
+        recovery_coordinator = TaskRecoveryCoordinator(
+            task_store=task_store,
+            definition_store=task_store,
+            execute_record=execute_recovery_record,
+        )
 
     async def dispatch_tool(
         name: str,
@@ -270,11 +299,23 @@ def create_mcp_server(
             )
             if allow_task_execution and is_task_request:
                 request_id = getattr(ctx, "request_id", None)
+                task_id = f"task-{uuid4().hex}"
                 logger.info(
                     "dispatching tool as task: tool=%s request_id=%s",
                     name,
                     request_id,
                 )
+                if recovery_coordinator is not None:
+                    await recovery_coordinator.register_task_definition(
+                        task_id=task_id,
+                        tool_name=name,
+                        tool_args=args,
+                        user_id=auth_context.user_id,
+                        tenant_id=auth_context.tenant_id,
+                        scopes=set(auth_context.scopes),
+                        approval_grants=set(auth_context.approval_grants),
+                        replayable=definition.replayable,
+                    )
 
                 async def work(task_ctx: Any) -> mcp_types.CallToolResult:
                     logger.info(
@@ -282,15 +323,27 @@ def create_mcp_server(
                         name,
                         request_id,
                     )
-                    result = dispatcher.dispatch(name=name, args=args, context=auth_context)
-                    logger.info(
-                        "task work finished: tool=%s request_id=%s",
-                        name,
-                        request_id,
-                    )
-                    return _to_call_tool_result(result)
+                    mark_task_running = getattr(recovery_coordinator, "mark_task_running", None)
+                    mark_task_completed = getattr(recovery_coordinator, "mark_task_completed", None)
+                    mark_task_failed = getattr(recovery_coordinator, "mark_task_failed", None)
+                    try:
+                        if callable(mark_task_running):
+                            await mark_task_running(task_id)
+                        result = dispatcher.dispatch(name=name, args=args, context=auth_context)
+                        if callable(mark_task_completed):
+                            await mark_task_completed(task_id)
+                        logger.info(
+                            "task work finished: tool=%s request_id=%s",
+                            name,
+                            request_id,
+                        )
+                        return _to_call_tool_result(result)
+                    except Exception as exc:
+                        if callable(mark_task_failed):
+                            await mark_task_failed(task_id, str(exc))
+                        raise
 
-                return await experimental.run_task(work)
+                return await experimental.run_task(work, task_id=task_id)
 
             return dispatcher.dispatch(name=name, args=args, context=auth_context)
         except ToolDispatchError as exc:
@@ -477,6 +530,18 @@ def create_mcp_server(
 
         app.list_tools = list_tools_with_task_support
         app._mcp_server.list_tools()(list_tools_with_task_support)
+        if recovery_coordinator is not None:
+            original_lifespan = app._mcp_server.lifespan
+
+            @asynccontextmanager
+            async def lifespan_with_recovery(lowlevel_server: Any):
+                async with original_lifespan(lowlevel_server) as context:
+                    async with anyio.create_task_group() as tg:
+                        await recovery_coordinator.schedule_recovery_on_startup(tg)
+                        yield context
+
+            app._mcp_server.lifespan = lifespan_with_recovery
+    app.task_recovery_coordinator = recovery_coordinator
 
     return app
 
@@ -488,6 +553,7 @@ def run_stdio_server(
     *,
     task_store: TaskStore | None = None,
     task_queue: TaskMessageQueue | None = None,
+    recovery_enabled: bool = True,
 ) -> None:
     app = create_mcp_server(
         stock_master_service=stock_master_service,
@@ -496,6 +562,7 @@ def run_stdio_server(
         transport="stdio",
         task_store=task_store,
         task_queue=task_queue,
+        recovery_enabled=recovery_enabled,
     )
     logger.info("mcp-stock-server ready on stdio")
     app.run(transport="stdio")
@@ -512,6 +579,7 @@ def run_streamable_http_server(
     auth_config: MCPAuthConfig | None = None,
     task_store: TaskStore | None = None,
     task_queue: TaskMessageQueue | None = None,
+    recovery_enabled: bool = True,
 ) -> None:
     app = create_mcp_server(
         stock_master_service=stock_master_service,
@@ -524,6 +592,7 @@ def run_streamable_http_server(
         auth_config=auth_config,
         task_store=task_store,
         task_queue=task_queue,
+        recovery_enabled=recovery_enabled,
     )
     logger.info(
         "mcp-stock-server ready on streamable-http http://%s:%s%s",

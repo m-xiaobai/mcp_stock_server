@@ -111,6 +111,7 @@ def build_stock_tool_registry(
                 destructive=True,
                 owner=OWNER,
                 version=VERSION,
+                replayable=True,
             ),
             handler=lambda args, context: insert_stock_daily_bars_after_close_tool(
                 stock_daily_service, args
@@ -249,6 +250,7 @@ def build_stock_tool_registry(
                 destructive=False,
                 owner=OWNER,
                 version=VERSION,
+                replayable=True,
             ),
             handler=lambda args, context: get_technical_snapshots_tool(stock_daily_service, args),
         )

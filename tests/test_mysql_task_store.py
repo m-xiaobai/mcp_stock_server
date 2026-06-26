@@ -17,6 +17,7 @@ class FakeTaskBackend:
     tasks: dict[str, Task] = field(default_factory=dict)
     results: dict[str, dict] = field(default_factory=dict)
     expiries: dict[str, datetime | None] = field(default_factory=dict)
+    recovery: dict[str, dict] = field(default_factory=dict)
 
 
 class MySQLTaskStoreTests(unittest.TestCase):
@@ -173,5 +174,132 @@ class MySQLTaskStoreTests(unittest.TestCase):
             expired = await restarted_store.create_task(TaskMetadata(ttl=1), task_id="task-expired")
             backend.expiries[expired.taskId] = datetime.now(timezone.utc) - timedelta(milliseconds=1)
             self.assertIsNone(await restarted_store.get_task("task-expired"))
+
+        anyio.run(scenario)
+
+    def test_mysql_task_store_recovery_metadata_contract(self):
+        from mcp_stock_server.repositories.task_store import MySQLTaskStore
+
+        class TestableMySQLTaskStore(MySQLTaskStore):
+            def __init__(self, backend: FakeTaskBackend, page_size: int = 10):
+                super().__init__(connection_factory=lambda: None, page_size=page_size)
+                self._backend = backend
+
+            def _ensure_schema_sync(self) -> None:
+                return None
+
+            def _register_task_definition_sync(
+                self,
+                *,
+                task_id: str,
+                tool_name: str,
+                tool_args: dict[str, object],
+                user_id: str,
+                tenant_id: str,
+                scopes: set[str],
+                approval_grants: set[str],
+                replayable: bool,
+            ) -> None:
+                self._backend.recovery[task_id] = {
+                    "task_id": task_id,
+                    "tool_name": tool_name,
+                    "tool_args_json": tool_args,
+                    "user_id": user_id,
+                    "tenant_id": tenant_id,
+                    "scopes_json": sorted(scopes),
+                    "approval_grants_json": sorted(approval_grants),
+                    "replayable": replayable,
+                    "execution_state": "queued",
+                    "attempt_count": 0,
+                    "last_error": None,
+                }
+
+            def _list_recoverable_tasks_sync(self):
+                from mcp_stock_server.recovery import RecoveryTaskRecord
+
+                records = []
+                for row in self._backend.recovery.values():
+                    if row["execution_state"] not in {"queued", "running"}:
+                        continue
+                    records.append(
+                        RecoveryTaskRecord(
+                            task_id=row["task_id"],
+                            tool_name=row["tool_name"],
+                            tool_args=dict(row["tool_args_json"]),
+                            user_id=row["user_id"],
+                            tenant_id=row["tenant_id"],
+                            scopes=set(row["scopes_json"]),
+                            approval_grants=set(row["approval_grants_json"]),
+                            replayable=bool(row["replayable"]),
+                            execution_state=row["execution_state"],
+                        )
+                    )
+                return records
+
+            def _get_task_definition_sync(self, task_id: str):
+                from mcp_stock_server.recovery import RecoveryTaskRecord
+
+                row = self._backend.recovery.get(task_id)
+                if row is None:
+                    return None
+                return RecoveryTaskRecord(
+                    task_id=row["task_id"],
+                    tool_name=row["tool_name"],
+                    tool_args=dict(row["tool_args_json"]),
+                    user_id=row["user_id"],
+                    tenant_id=row["tenant_id"],
+                    scopes=set(row["scopes_json"]),
+                    approval_grants=set(row["approval_grants_json"]),
+                    replayable=bool(row["replayable"]),
+                    execution_state=row["execution_state"],
+                )
+
+            def _mark_execution_state_sync(
+                self,
+                task_id: str,
+                *,
+                execution_state: str,
+                attempt_increment: bool = False,
+                last_error: str | None = None,
+            ) -> None:
+                row = self._backend.recovery[task_id]
+                row["execution_state"] = execution_state
+                if attempt_increment:
+                    row["attempt_count"] += 1
+                if last_error is not None:
+                    row["last_error"] = last_error
+
+        async def scenario() -> None:
+            backend = FakeTaskBackend()
+            store = TestableMySQLTaskStore(backend)
+
+            await store.register_task_definition(
+                task_id="task-meta-1",
+                tool_name="get_technical_snapshot",
+                tool_args={"symbols": ["600000"], "trade_date": "2026-05-26"},
+                user_id="u1",
+                tenant_id="t1",
+                scopes={"stock:snapshot:read"},
+                approval_grants=set(),
+                replayable=True,
+            )
+            record = await store.get_task_definition("task-meta-1")
+            self.assertEqual(record.tool_name, "get_technical_snapshot")
+            self.assertTrue(record.replayable)
+
+            queued = await store.list_recoverable_tasks()
+            self.assertEqual([item.task_id for item in queued], ["task-meta-1"])
+
+            await store.mark_task_running("task-meta-1")
+            running = await store.get_task_definition("task-meta-1")
+            self.assertEqual(running.execution_state, "running")
+
+            await store.mark_task_completed("task-meta-1")
+            completed = await store.get_task_definition("task-meta-1")
+            self.assertEqual(completed.execution_state, "completed")
+
+            await store.mark_task_failed("task-meta-1", "boom")
+            failed = await store.get_task_definition("task-meta-1")
+            self.assertEqual(failed.execution_state, "failed")
 
         anyio.run(scenario)

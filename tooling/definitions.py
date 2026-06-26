@@ -13,3 +13,4 @@ class ToolDefinition:
     destructive: bool
     owner: str
     version: str
+    replayable: bool = False

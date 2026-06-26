@@ -898,7 +898,10 @@ class MCPRefactorArchitectureTests(unittest.TestCase):
         self.assertIn("upsert_stock_daily_bars", definitions)
         self.assertIn("insert_stock_daily_bars_after_close", definitions)
         self.assertFalse(definitions["get_stock_daily_bars"].destructive)
+        self.assertFalse(definitions["get_stock_daily_bars"].replayable)
         self.assertTrue(definitions["upsert_stock_daily_bars"].destructive)
+        self.assertTrue(definitions["insert_stock_daily_bars_after_close"].replayable)
+        self.assertTrue(definitions["get_technical_snapshot"].replayable)
         self.assertEqual(definitions["compute_kdj"].owner, "stock-platform")
         self.assertIn("stock:indicator:read", definitions["compute_kdj"].required_scopes)
 
@@ -1078,6 +1081,244 @@ class MCPRefactorArchitectureTests(unittest.TestCase):
             app.registered["upsert_stock_daily_bars"]["description"],
             "Insert or update stock daily bars after market close.",
         )
+
+    def test_task_request_registers_recovery_metadata_and_reuses_explicit_task_id(self):
+        import mcp.types as mcp_types
+        from mcp_stock_server.server import create_mcp_server
+
+        class FakeRecoveryCoordinator:
+            def __init__(self):
+                self.registered = []
+
+            async def register_task_definition(self, **kwargs):
+                self.registered.append(kwargs)
+
+        class FakeFastMCP:
+            def __init__(self, name, **kwargs):
+                self.name = name
+                self.registered = {}
+
+            def tool(self, name=None, description=None):
+                def decorator(func):
+                    self.registered[name or func.__name__] = func
+                    return func
+
+                return decorator
+
+        class FakeStockMasterService:
+            def list_stock_codes(self):
+                return []
+
+        class FakeStockDailyService:
+            def get_stock_daily_bars(self, time, codes, limit=120):
+                return type("Response", (), {"time": time, "items": []})()
+
+            def upsert_stock_daily_bars(self, request):
+                return type(
+                    "Response",
+                    (),
+                    {"time": request.time, "total": 1, "success": 1, "failed": 0, "errors": []},
+                )()
+
+        class FakeExperimental:
+            def __init__(self):
+                self.task_metadata = SimpleNamespace(ttl=60000)
+                self.is_task = True
+                self.captured_task_id = None
+
+            def validate_task_mode(self, mode, *, raise_error=True):
+                return None
+
+            async def run_task(self, work, *, task_id=None, **kwargs):
+                self.captured_task_id = task_id
+                await work(SimpleNamespace())
+                task = mcp_types.Task(
+                    taskId=task_id,
+                    status=mcp_types.TASK_STATUS_WORKING,
+                    createdAt=datetime.now(timezone.utc),
+                    lastUpdatedAt=datetime.now(timezone.utc),
+                    ttl=60000,
+                )
+                return mcp_types.CreateTaskResult(task=task)
+
+        recovery = FakeRecoveryCoordinator()
+        app = create_mcp_server(
+            FakeStockMasterService(),
+            FakeStockDailyService(),
+            fastmcp_cls=FakeFastMCP,
+            recovery_coordinator=recovery,
+        )
+        experimental = FakeExperimental()
+        fake_ctx = SimpleNamespace(
+            request_id="req-task-replay-1",
+            request_context=SimpleNamespace(experimental=experimental),
+        )
+
+        with patch(
+            "mcp_stock_server.server.ToolDispatcher.dispatch",
+            autospec=True,
+            return_value={"ok": True},
+        ):
+            result = asyncio.run(
+                app.registered["insert_stock_daily_bars_after_close"]("2026-05-26", fake_ctx)
+            )
+
+        self.assertIsInstance(result, mcp_types.CreateTaskResult)
+        self.assertIsNotNone(experimental.captured_task_id)
+        self.assertEqual(result.task.taskId, experimental.captured_task_id)
+        self.assertEqual(len(recovery.registered), 1)
+        self.assertEqual(recovery.registered[0]["tool_name"], "insert_stock_daily_bars_after_close")
+        self.assertEqual(recovery.registered[0]["tool_args"], {"time": "2026-05-26"})
+        self.assertTrue(recovery.registered[0]["replayable"])
+
+    def test_create_mcp_server_wraps_lifespan_to_schedule_recovery(self):
+        from contextlib import asynccontextmanager
+        from mcp_stock_server.server import create_mcp_server
+
+        class FakeRecoveryCoordinator:
+            def __init__(self):
+                self.calls = 0
+
+            async def schedule_recovery_on_startup(self, task_group):
+                self.calls += 1
+                return 0
+
+        class FakeLowLevelServer:
+            def __init__(self):
+                self.experimental = SimpleNamespace(enable_tasks=lambda **kwargs: None)
+
+            @asynccontextmanager
+            async def lifespan(self, _server):
+                yield {"ok": True}
+
+            def create_initialization_options(self, *args, **kwargs):
+                return SimpleNamespace(capabilities=SimpleNamespace(extensions={}))
+
+            def list_tools(self):
+                def decorator(func):
+                    return func
+
+                return decorator
+
+            def call_tool(self, validate_input=False):
+                def decorator(func):
+                    return func
+
+                return decorator
+
+        class FakeFastMCP:
+            def __init__(self, name, **kwargs):
+                self.name = name
+                self.registered = {}
+                self._mcp_server = FakeLowLevelServer()
+
+            def tool(self, name=None, description=None):
+                def decorator(func):
+                    self.registered[name or func.__name__] = func
+                    return func
+
+                return decorator
+
+            async def list_tools(self):
+                return []
+
+        class FakeStockMasterService:
+            def list_stock_codes(self):
+                return []
+
+        class FakeStockDailyService:
+            def get_stock_daily_bars(self, time, codes, limit=120):
+                return type("Response", (), {"time": time, "items": []})()
+
+            def upsert_stock_daily_bars(self, request):
+                return type(
+                    "Response",
+                    (),
+                    {"time": request.time, "total": 0, "success": 0, "failed": 0, "errors": []},
+                )()
+
+        recovery = FakeRecoveryCoordinator()
+        app = create_mcp_server(
+            FakeStockMasterService(),
+            FakeStockDailyService(),
+            fastmcp_cls=FakeFastMCP,
+            recovery_coordinator=recovery,
+        )
+
+        async def run_lifespan():
+            async with app._mcp_server.lifespan(app._mcp_server) as context:
+                self.assertEqual(context, {"ok": True})
+
+        asyncio.run(run_lifespan())
+        self.assertEqual(recovery.calls, 1)
+
+    def test_create_mcp_server_can_disable_automatic_recovery(self):
+        from mcp_stock_server.server import create_mcp_server
+
+        class FakeRecoveryCapableStore:
+            async def register_task_definition(self, **kwargs):
+                raise NotImplementedError
+
+        class FakeLowLevelServer:
+            def __init__(self):
+                self.experimental = SimpleNamespace(enable_tasks=lambda **kwargs: None)
+                self.lifespan = lambda _server: None
+
+            def create_initialization_options(self, *args, **kwargs):
+                return SimpleNamespace(capabilities=SimpleNamespace(extensions={}))
+
+            def list_tools(self):
+                def decorator(func):
+                    return func
+
+                return decorator
+
+            def call_tool(self, validate_input=False):
+                def decorator(func):
+                    return func
+
+                return decorator
+
+        class FakeFastMCP:
+            def __init__(self, name, **kwargs):
+                self.name = name
+                self.registered = {}
+                self._mcp_server = FakeLowLevelServer()
+
+            def tool(self, name=None, description=None):
+                def decorator(func):
+                    self.registered[name or func.__name__] = func
+                    return func
+
+                return decorator
+
+            async def list_tools(self):
+                return []
+
+        class FakeStockMasterService:
+            def list_stock_codes(self):
+                return []
+
+        class FakeStockDailyService:
+            def get_stock_daily_bars(self, time, codes, limit=120):
+                return type("Response", (), {"time": time, "items": []})()
+
+            def upsert_stock_daily_bars(self, request):
+                return type(
+                    "Response",
+                    (),
+                    {"time": request.time, "total": 0, "success": 0, "failed": 0, "errors": []},
+                )()
+
+        app = create_mcp_server(
+            FakeStockMasterService(),
+            FakeStockDailyService(),
+            fastmcp_cls=FakeFastMCP,
+            task_store=FakeRecoveryCapableStore(),
+            recovery_enabled=False,
+        )
+
+        self.assertIsNone(app.task_recovery_coordinator)
 
     def test_dispatcher_rejects_wrong_argument_type(self):
         from mcp_stock_server.audit.writer import JsonlAuditWriter

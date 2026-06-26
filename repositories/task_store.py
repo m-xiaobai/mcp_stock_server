@@ -11,6 +11,7 @@ from pydantic import TypeAdapter
 from mcp.shared.experimental.tasks.helpers import create_task_state, is_terminal
 from mcp.shared.experimental.tasks.store import TaskStore
 from mcp.types import Result, Task, TaskMetadata, TaskStatus
+from ..recovery import RecoveryTaskRecord
 
 ConnectionFactory = Callable[[], Any]
 
@@ -378,3 +379,216 @@ WHERE status = %s
         self._update_versions[task_id] = self._update_versions.get(task_id, 0) + 1
         if task_id in self._update_events:
             self._update_events[task_id].set()
+
+    def _register_task_definition_sync(
+        self,
+        *,
+        task_id: str,
+        tool_name: str,
+        tool_args: dict[str, Any],
+        user_id: str,
+        tenant_id: str,
+        scopes: set[str],
+        approval_grants: set[str],
+        replayable: bool,
+    ) -> None:
+        connection = self._connection_factory()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+INSERT INTO mcp_task_recovery (
+    task_id,
+    tool_name,
+    tool_args_json,
+    execution_state,
+    replayable,
+    user_id,
+    tenant_id,
+    scopes_json,
+    approval_grants_json,
+    attempt_count,
+    last_error,
+    recovery_started_at,
+    lease_owner,
+    lease_expires_at
+) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+ON DUPLICATE KEY UPDATE
+    tool_name = VALUES(tool_name),
+    tool_args_json = VALUES(tool_args_json),
+    execution_state = VALUES(execution_state),
+    replayable = VALUES(replayable),
+    user_id = VALUES(user_id),
+    tenant_id = VALUES(tenant_id),
+    scopes_json = VALUES(scopes_json),
+    approval_grants_json = VALUES(approval_grants_json)
+""".strip(),
+                    (
+                        task_id,
+                        tool_name,
+                        json.dumps(tool_args, ensure_ascii=False),
+                        "queued",
+                        1 if replayable else 0,
+                        user_id,
+                        tenant_id,
+                        json.dumps(sorted(scopes), ensure_ascii=False),
+                        json.dumps(sorted(approval_grants), ensure_ascii=False),
+                        0,
+                        None,
+                        None,
+                        None,
+                        None,
+                    ),
+                )
+            if hasattr(connection, "commit"):
+                connection.commit()
+        except Exception:
+            if hasattr(connection, "rollback"):
+                connection.rollback()
+            raise
+
+    async def register_task_definition(
+        self,
+        *,
+        task_id: str,
+        tool_name: str,
+        tool_args: dict[str, Any],
+        user_id: str,
+        tenant_id: str,
+        scopes: set[str],
+        approval_grants: set[str],
+        replayable: bool,
+    ) -> None:
+        await anyio.to_thread.run_sync(
+            lambda: self._register_task_definition_sync(
+                task_id=task_id,
+                tool_name=tool_name,
+                tool_args=tool_args,
+                user_id=user_id,
+                tenant_id=tenant_id,
+                scopes=scopes,
+                approval_grants=approval_grants,
+                replayable=replayable,
+            )
+        )
+
+    def _list_recoverable_tasks_sync(self) -> list[RecoveryTaskRecord]:
+        connection = self._connection_factory()
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+SELECT r.task_id, r.tool_name, r.tool_args_json, r.user_id, r.tenant_id, r.scopes_json, r.approval_grants_json, r.replayable, r.execution_state
+FROM mcp_task_recovery r
+INNER JOIN mcp_tasks t
+  ON t.task_id = r.task_id
+WHERE t.status = %s
+  AND r.execution_state IN (%s, %s)
+ORDER BY r.task_id ASC
+""".strip(),
+                ("working", "queued", "running"),
+            )
+            rows = cursor.fetchall()
+        records: list[RecoveryTaskRecord] = []
+        for row in rows:
+            records.append(
+                RecoveryTaskRecord(
+                    task_id=row["task_id"],
+                    tool_name=row["tool_name"],
+                    tool_args=json.loads(row["tool_args_json"] or "{}"),
+                    user_id=row["user_id"],
+                    tenant_id=row["tenant_id"],
+                    scopes=set(json.loads(row["scopes_json"] or "[]")),
+                    approval_grants=set(json.loads(row["approval_grants_json"] or "[]")),
+                    replayable=bool(row["replayable"]),
+                    execution_state=row["execution_state"],
+                )
+            )
+        return records
+
+    async def list_recoverable_tasks(self) -> list[RecoveryTaskRecord]:
+        return await anyio.to_thread.run_sync(self._list_recoverable_tasks_sync)
+
+    def _get_task_definition_sync(self, task_id: str) -> RecoveryTaskRecord | None:
+        connection = self._connection_factory()
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+SELECT task_id, tool_name, tool_args_json, user_id, tenant_id, scopes_json, approval_grants_json, replayable, execution_state
+FROM mcp_task_recovery
+WHERE task_id = %s
+""".strip(),
+                (task_id,),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            return None
+        return RecoveryTaskRecord(
+            task_id=row["task_id"],
+            tool_name=row["tool_name"],
+            tool_args=json.loads(row["tool_args_json"] or "{}"),
+            user_id=row["user_id"],
+            tenant_id=row["tenant_id"],
+            scopes=set(json.loads(row["scopes_json"] or "[]")),
+            approval_grants=set(json.loads(row["approval_grants_json"] or "[]")),
+            replayable=bool(row["replayable"]),
+            execution_state=row["execution_state"],
+        )
+
+    async def get_task_definition(self, task_id: str) -> RecoveryTaskRecord | None:
+        return await anyio.to_thread.run_sync(self._get_task_definition_sync, task_id)
+
+    def _mark_execution_state_sync(
+        self,
+        task_id: str,
+        *,
+        execution_state: str,
+        attempt_increment: bool = False,
+        last_error: str | None = None,
+    ) -> None:
+        connection = self._connection_factory()
+        try:
+            with connection.cursor() as cursor:
+                sql = """
+UPDATE mcp_task_recovery
+SET execution_state = %s,
+    recovery_started_at = %s,
+    last_error = %s
+""".strip()
+                params: list[Any] = [execution_state, self._to_db_datetime(datetime.now(timezone.utc)), last_error]
+                if attempt_increment:
+                    sql += ",\n    attempt_count = attempt_count + 1"
+                sql += "\nWHERE task_id = %s"
+                params.append(task_id)
+                cursor.execute(sql, tuple(params))
+            if hasattr(connection, "commit"):
+                connection.commit()
+        except Exception:
+            if hasattr(connection, "rollback"):
+                connection.rollback()
+            raise
+
+    async def mark_task_running(self, task_id: str) -> None:
+        await anyio.to_thread.run_sync(
+            lambda: self._mark_execution_state_sync(
+                task_id,
+                execution_state="running",
+                attempt_increment=True,
+            )
+        )
+
+    async def mark_task_completed(self, task_id: str) -> None:
+        await anyio.to_thread.run_sync(
+            lambda: self._mark_execution_state_sync(
+                task_id,
+                execution_state="completed",
+            )
+        )
+
+    async def mark_task_failed(self, task_id: str, error: str) -> None:
+        await anyio.to_thread.run_sync(
+            lambda: self._mark_execution_state_sync(
+                task_id,
+                execution_state="failed",
+                last_error=error,
+            )
+        )

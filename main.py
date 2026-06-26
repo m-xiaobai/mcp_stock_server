@@ -53,6 +53,7 @@ class MCPRuntimeConfig:
     port: int = 8000
     streamable_http_path: str = "/mcp"
     task_store_backend: str = "memory"
+    recovery_enabled: bool = True
     auth: MCPAuthConfig = field(default_factory=MCPAuthConfig)
 
     @classmethod
@@ -60,13 +61,16 @@ class MCPRuntimeConfig:
         config_path = Path(path)
         payload = json.loads(config_path.read_text(encoding="utf-8"))
         mcp_payload = payload.get("mcp", {})
+        tasks_payload = mcp_payload.get("tasks", {})
+        recovery_payload = tasks_payload.get("recovery", {})
         auth_payload = mcp_payload.get("auth", {})
         return cls(
             transport=str(mcp_payload.get("transport", "stdio")),
             host=str(mcp_payload.get("host", "127.0.0.1")),
             port=int(mcp_payload.get("port", 8000)),
             streamable_http_path=str(mcp_payload.get("streamable_http_path", "/mcp")),
-            task_store_backend=str(mcp_payload.get("tasks", {}).get("store_backend", "memory")),
+            task_store_backend=str(tasks_payload.get("store_backend", "memory")),
+            recovery_enabled=bool(recovery_payload.get("enabled", True)),
             auth=MCPAuthConfig(
                 enabled=bool(auth_payload.get("enabled", False)),
                 mode=auth_payload.get("mode"),
@@ -135,7 +139,6 @@ def build_task_store(
 
     store = MySQLTaskStore(connection_factory_builder(mysql_config))
     anyio.run(store.ensure_schema)
-    anyio.run(store.reconcile_orphaned_tasks)
     return store
 
 
@@ -167,7 +170,13 @@ if __name__ == "__main__":
             streamable_http_path=runtime_config.streamable_http_path,
             auth_config=runtime_config.auth,
             task_store=task_store,
+            recovery_enabled=runtime_config.recovery_enabled,
         )
     else:
-        run_stdio_server(stock_master_service, stock_daily_service, task_store=task_store)
+        run_stdio_server(
+            stock_master_service,
+            stock_daily_service,
+            task_store=task_store,
+            recovery_enabled=runtime_config.recovery_enabled,
+        )
     logger.info("MCP Stock Server running")

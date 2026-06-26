@@ -79,6 +79,37 @@ class MCPStockServerTests(unittest.TestCase):
 
         self.assertEqual(config.task_store_backend, "mysql")
 
+    def test_mcp_runtime_config_defaults_recovery_enabled_to_true(self):
+        from mcp_stock_server.main import MCPRuntimeConfig
+
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "config.json"
+            path.write_text(
+                '{"mysql":{"host":"127.0.0.1","port":3306,"user":"u","password":"p","database":"stocks"}}',
+                encoding="utf-8",
+            )
+
+            config = MCPRuntimeConfig.from_file(path)
+
+        self.assertTrue(config.recovery_enabled)
+
+    def test_mcp_runtime_config_loads_recovery_enabled_from_file(self):
+        from mcp_stock_server.main import MCPRuntimeConfig
+
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "config.json"
+            path.write_text(
+                (
+                    '{"mysql":{"host":"127.0.0.1","port":3306,"user":"u","password":"p","database":"stocks"},'
+                    '"mcp":{"tasks":{"store_backend":"mysql","recovery":{"enabled":false}}}}'
+                ),
+                encoding="utf-8",
+            )
+
+            config = MCPRuntimeConfig.from_file(path)
+
+        self.assertFalse(config.recovery_enabled)
+
     def test_upsert_request_rejects_mismatched_trade_date(self):
         from mcp_stock_server.models.request_models import UpsertStockDailyBarsRequest
 
@@ -1294,7 +1325,7 @@ class MCPStockServerTests(unittest.TestCase):
 
         self.assertIs(store, FakeTaskStore.instances[0])
         self.assertEqual(store.ensure_schema_called, 1)
-        self.assertEqual(store.reconcile_called, 1)
+        self.assertEqual(store.reconcile_called, 0)
 
     def test_stock_master_service_initializes_master_rows(self):
         from mcp_stock_server.models.db_models import StockCodeItem
