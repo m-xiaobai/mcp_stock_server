@@ -130,6 +130,7 @@ def build_task_store(
     connection_factory_builder: Callable[[MySQLConfig], Callable[[], object]] | None = None,
 ):
     if runtime_config.task_store_backend != "mysql":
+        logger.info("task persistence disabled: task_store_backend=%s", runtime_config.task_store_backend)
         return None
 
     if connection_factory_builder is None:
@@ -137,8 +138,8 @@ def build_task_store(
         def connection_factory_builder(current_config: MySQLConfig) -> Callable[[], object]:
             return lambda: create_pymysql_connection(current_config)
 
+    logger.info("task persistence enabled: initializing MySQLTaskStore")
     store = MySQLTaskStore(connection_factory_builder(mysql_config))
-    anyio.run(store.ensure_schema)
     return store
 
 
@@ -158,6 +159,12 @@ if __name__ == "__main__":
     stock_master_service, stock_daily_service = build_mysql_services(config=mysql_config)
     runtime_config = MCPRuntimeConfig.from_file(config_path)
     task_store = build_task_store(runtime_config, mysql_config)
+    logger.info(
+        "runtime task settings: backend=%s recovery_enabled=%s task_store_active=%s",
+        runtime_config.task_store_backend,
+        runtime_config.recovery_enabled,
+        task_store is not None,
+    )
     transport = runtime_config.transport
     if len(sys.argv) > 1:
         transport = sys.argv[1]

@@ -517,6 +517,12 @@ def create_mcp_server(
         tasks_enabled=tasks_enabled,
         task_aware_tools=sorted(TASK_AWARE_TOOLS),
     )
+    logger.info(
+        "server task wiring: task_store_active=%s recovery_enabled=%s tasks_enabled=%s",
+        task_store is not None,
+        recovery_enabled,
+        tasks_enabled,
+    )
 
     if hasattr(app, "_mcp_server"):
         original_list_tools = app.list_tools

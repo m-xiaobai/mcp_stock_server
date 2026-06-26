@@ -18,7 +18,7 @@
       }
     },
     "auth": {
-      "enabled": true,
+      "enabled": false,
       "mode": "resource-server",
       "verification": "introspection",
       "issuer_url": "http://localhost:8080/realms/master",
