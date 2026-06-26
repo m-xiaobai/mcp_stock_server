@@ -11,7 +11,13 @@
     "host": "127.0.0.1",
     "port": 8000,
     "streamable_http_path": "/mcp",
-      "auth": {
+    "tasks": {
+      "store_backend": "mysql",
+      "recovery": {
+        "enabled": true
+      }
+    },
+    "auth": {
       "enabled": true,
       "mode": "resource-server",
       "verification": "introspection",
