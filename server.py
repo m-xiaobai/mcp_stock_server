@@ -19,11 +19,14 @@ from mcp.shared.experimental.tasks.store import TaskStore
 from .audit.writer import JsonlAuditWriter
 from .auth.approval import InMemoryApprovalChecker
 from .auth.context import AuthContext, build_development_auth_context, build_runtime_auth_context
-from .auth.elicitation import (
-    DestructiveApprovalForm,
-    build_destructive_approval_message,
-    supports_form_elicitation,
-)
+# Elicitation-based destructive approval is temporarily disabled.
+# Keep the helper module untouched so it can be restored later if needed,
+# but do not route runtime approval through ctx.elicit() for now.
+# from .auth.elicitation import (
+#     DestructiveApprovalForm,
+#     build_destructive_approval_message,
+#     supports_form_elicitation,
+# )
 from .auth.oauth import MCPAuthConfig, build_token_verifier
 from .governance.policy import PolicyEngine
 from .governance.redaction import Redactor
@@ -40,6 +43,7 @@ logger = logging.getLogger(__name__)
 
 TASK_AWARE_TOOLS = {"insert_stock_daily_bars_after_close","get_technical_snapshot"}
 TASK_EXTENSION_NAME = "io.modelcontextprotocol/tasks"
+TOOL_META_NAMESPACE = "nanobot"
 
 
 def _to_call_tool_result(payload: Any) -> mcp_types.CallToolResult:
@@ -86,6 +90,42 @@ def _is_task_request_for_tool(experimental: Any, tool_name: str) -> bool:
             return False
 
     return getattr(experimental, "task_metadata", None) is not None
+
+
+def _tool_read_only_hint(definition: Any) -> bool:
+    """Infer whether a tool is read-only from its governance metadata."""
+    if getattr(definition, "destructive", False):
+        return False
+    required_scopes = getattr(definition, "required_scopes", set()) or set()
+    return not any(str(scope).endswith(":write") for scope in required_scopes)
+
+
+def _tool_annotations(definition: Any) -> mcp_types.ToolAnnotations:
+    """Build standard MCP ToolAnnotations from ToolDefinition metadata."""
+    read_only = _tool_read_only_hint(definition)
+    annotations = mcp_types.ToolAnnotations(
+        title=getattr(definition, "name", None),
+        readOnlyHint=read_only,
+        openWorldHint=False,
+    )
+    if not read_only:
+        annotations.destructiveHint = bool(getattr(definition, "destructive", False))
+    return annotations
+
+
+def _tool_meta(definition: Any) -> dict[str, Any]:
+    """Build nanobot-specific tool metadata for clients that need more detail."""
+    read_only = _tool_read_only_hint(definition)
+    return {
+        TOOL_META_NAMESPACE: {
+            "destructive": bool(getattr(definition, "destructive", False)),
+            "readOnly": read_only,
+            "requiredScopes": sorted(getattr(definition, "required_scopes", set()) or set()),
+            "owner": getattr(definition, "owner", None),
+            "version": getattr(definition, "version", None),
+            "replayable": bool(getattr(definition, "replayable", False)),
+        }
+    }
 
 
 def _build_fastmcp_app(
@@ -239,49 +279,57 @@ def create_mcp_server(
                     user_id=user_id,
                     tenant_id="default",
                     request_id=ctx.request_id,
-                    grant_destructive_approvals=False,
+                    # Elicitation is temporarily disabled, so destructive tools
+                    # are granted at auth-context creation time and rely on the
+                    # client-side approval gate plus server-side dispatcher/policy
+                    # as the remaining enforcement layers.
+                    grant_destructive_approvals=True,
                 )
-                if definition.destructive:
-                    if not supports_form_elicitation(ctx.session):
-                        dispatcher.record_denied(
-                            name=name,
-                            args=args,
-                            context=auth_context,
-                            error_code="approval_unsupported",
-                        )
-                        return error_response(
-                            "approval_unsupported",
-                            f"client does not support elicitation for {name}",
-                        )
-
-                    approval = await ctx.elicit(
-                        build_destructive_approval_message(name),
-                        DestructiveApprovalForm,
-                    )
-                    if approval.action == "cancel":
-                        dispatcher.record_denied(
-                            name=name,
-                            args=args,
-                            context=auth_context,
-                            error_code="approval_cancelled",
-                        )
-                        return error_response(
-                            "approval_cancelled",
-                            f"user cancelled destructive operation {name}",
-                        )
-                    if approval.action == "decline" or not approval.data.confirm:
-                        dispatcher.record_denied(
-                            name=name,
-                            args=args,
-                            context=auth_context,
-                            error_code="approval_declined",
-                        )
-                        return error_response(
-                            "approval_declined",
-                            f"user declined destructive operation {name}",
-                        )
-
-                    auth_context.approval_grants.add(name)
+                # Elicitation-based destructive confirmation is intentionally
+                # commented out for now. Host-side approval in nanobot should
+                # make the go/no-go decision before the remote tool call runs.
+                #
+                # if definition.destructive:
+                #     if not supports_form_elicitation(ctx.session):
+                #         dispatcher.record_denied(
+                #             name=name,
+                #             args=args,
+                #             context=auth_context,
+                #             error_code="approval_unsupported",
+                #         )
+                #         return error_response(
+                #             "approval_unsupported",
+                #             f"client does not support elicitation for {name}",
+                #         )
+                #
+                #     approval = await ctx.elicit(
+                #         build_destructive_approval_message(name),
+                #         DestructiveApprovalForm,
+                #     )
+                #     if approval.action == "cancel":
+                #         dispatcher.record_denied(
+                #             name=name,
+                #             args=args,
+                #             context=auth_context,
+                #             error_code="approval_cancelled",
+                #         )
+                #         return error_response(
+                #             "approval_cancelled",
+                #             f"user cancelled destructive operation {name}",
+                #         )
+                #     if approval.action == "decline" or not approval.data.confirm:
+                #         dispatcher.record_denied(
+                #             name=name,
+                #             args=args,
+                #             context=auth_context,
+                #             error_code="approval_declined",
+                #         )
+                #         return error_response(
+                #             "approval_declined",
+                #             f"user declined destructive operation {name}",
+                #         )
+                #
+                #     auth_context.approval_grants.add(name)
             else:
                 auth_context = build_development_auth_context(registry.list_tools())
 
@@ -530,6 +578,12 @@ def create_mcp_server(
         async def list_tools_with_task_support() -> list[mcp_types.Tool]:
             tools = await original_list_tools()
             for tool in tools:
+                definition = definitions.get(tool.name)
+                if definition is not None:
+                    tool.annotations = _tool_annotations(definition)
+                    existing_meta = dict(getattr(tool, "meta", None) or {})
+                    existing_meta.update(_tool_meta(definition))
+                    tool.meta = existing_meta
                 if tool.name in TASK_AWARE_TOOLS:
                     tool.execution = mcp_types.ToolExecution(taskSupport=mcp_types.TASK_OPTIONAL)
             return tools

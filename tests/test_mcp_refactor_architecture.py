@@ -212,7 +212,7 @@ class MCPRefactorArchitectureTests(unittest.TestCase):
         self.assertIn("stock:daily:read", captured_contexts[0].scopes)
         self.assertEqual(captured_contexts[0].approval_grants, set())
 
-    def test_http_destructive_tool_requires_elicitation_support(self):
+    def test_http_destructive_tool_no_longer_requires_elicitation_support(self):
         from mcp_stock_server.server import create_mcp_server
 
         class FakeFastMCP:
@@ -242,11 +242,7 @@ class MCPRefactorArchitectureTests(unittest.TestCase):
                     {"time": request.time, "total": 0, "success": 0, "failed": 0, "errors": []},
                 )()
 
-        class FakeSession:
-            def check_client_capability(self, capability):
-                return False
-
-        fake_ctx = SimpleNamespace(request_id="req-2", session=FakeSession())
+        fake_ctx = SimpleNamespace(request_id="req-2", session=SimpleNamespace())
         app = create_mcp_server(
             FakeStockMasterService(),
             FakeStockDailyService(),
@@ -254,14 +250,15 @@ class MCPRefactorArchitectureTests(unittest.TestCase):
             transport="streamable-http",
         )
 
-        with patch("mcp_stock_server.server.ToolDispatcher.record_denied", autospec=True):
+        with patch("mcp_stock_server.server.ToolDispatcher.record_denied", autospec=True) as record_denied:
             result = asyncio.run(
                 app.registered["upsert_stock_daily_bars"]("2026-05-26", [], fake_ctx)
             )
 
-        self.assertEqual(result["error"]["code"], "approval_unsupported")
+        self.assertEqual(result["success"], 0)
+        record_denied.assert_not_called()
 
-    def test_http_destructive_tool_executes_after_elicitation_accept(self):
+    def test_http_destructive_tool_executes_without_elicitation_prompt(self):
         from mcp_stock_server.server import create_mcp_server
         from unittest.mock import patch
 
@@ -292,20 +289,10 @@ class MCPRefactorArchitectureTests(unittest.TestCase):
                     {"time": request.time, "total": 1, "success": 1, "failed": 0, "errors": []},
                 )()
 
-        class FakeSession:
-            def check_client_capability(self, capability):
-                return True
-
         class FakeContext:
             def __init__(self):
                 self.request_id = "req-3"
-                self.session = FakeSession()
-
-            async def elicit(self, message, schema):
-                return SimpleNamespace(
-                    action="accept",
-                    data=SimpleNamespace(confirm=True, reason="ok"),
-                )
+                self.session = SimpleNamespace()
 
         app = create_mcp_server(
             FakeStockMasterService(),
@@ -742,6 +729,17 @@ class MCPRefactorArchitectureTests(unittest.TestCase):
         self.assertEqual(
             tool_map["insert_stock_daily_bars_after_close"].execution.taskSupport,
             mcp_types.TASK_OPTIONAL,
+        )
+        self.assertIsNotNone(tool_map["upsert_stock_daily_bars"].annotations)
+        self.assertFalse(tool_map["upsert_stock_daily_bars"].annotations.readOnlyHint)
+        self.assertTrue(tool_map["upsert_stock_daily_bars"].annotations.destructiveHint)
+        self.assertIsNotNone(tool_map["get_stock_daily_bars"].annotations)
+        self.assertTrue(tool_map["get_stock_daily_bars"].annotations.readOnlyHint)
+        self.assertIsNotNone(tool_map["upsert_stock_daily_bars"].meta)
+        self.assertTrue(tool_map["upsert_stock_daily_bars"].meta["nanobot"]["destructive"])
+        self.assertEqual(
+            tool_map["upsert_stock_daily_bars"].meta["nanobot"]["requiredScopes"],
+            ["stock:daily:write"],
         )
 
     def test_real_fastmcp_initialization_advertises_tasks_capability(self):
