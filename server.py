@@ -4,6 +4,7 @@ import json
 import logging
 import sys
 from contextlib import asynccontextmanager
+from functools import partial
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -44,6 +45,17 @@ logger = logging.getLogger(__name__)
 TASK_AWARE_TOOLS = {"insert_stock_daily_bars_after_close","get_technical_snapshot"}
 TASK_EXTENSION_NAME = "io.modelcontextprotocol/tasks"
 TOOL_META_NAMESPACE = "nanobot"
+
+
+async def _dispatch_in_worker(
+    dispatcher: ToolDispatcher,
+    *,
+    name: str,
+    args: dict[str, Any],
+    context: AuthContext,
+) -> Any:
+    call = partial(dispatcher.dispatch, name=name, args=args, context=context)
+    return await anyio.to_thread.run_sync(call, abandon_on_cancel=True)
 
 
 def _to_call_tool_result(payload: Any) -> mcp_types.CallToolResult:
@@ -241,7 +253,12 @@ def create_mcp_server(
             approval_grants=set(record.approval_grants),
             request_id=f"replay-{record.task_id}",
         )
-        result = dispatcher.dispatch(name=record.tool_name, args=record.tool_args, context=auth_context)
+        result = await _dispatch_in_worker(
+            dispatcher,
+            name=record.tool_name,
+            args=record.tool_args,
+            context=auth_context,
+        )
         return _to_call_tool_result(result)
 
     if (
@@ -377,7 +394,12 @@ def create_mcp_server(
                     try:
                         if callable(mark_task_running):
                             await mark_task_running(task_id)
-                        result = dispatcher.dispatch(name=name, args=args, context=auth_context)
+                        result = await _dispatch_in_worker(
+                            dispatcher,
+                            name=name,
+                            args=args,
+                            context=auth_context,
+                        )
                         if callable(mark_task_completed):
                             await mark_task_completed(task_id)
                         logger.info(
@@ -393,7 +415,12 @@ def create_mcp_server(
 
                 return await experimental.run_task(work, task_id=task_id)
 
-            return dispatcher.dispatch(name=name, args=args, context=auth_context)
+            return await _dispatch_in_worker(
+                dispatcher,
+                name=name,
+                args=args,
+                context=auth_context,
+            )
         except ToolDispatchError as exc:
             return error_response(exc.code, exc.message)
 

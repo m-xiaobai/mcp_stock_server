@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import tempfile
+import threading
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,6 +12,35 @@ from unittest.mock import AsyncMock, patch
 
 
 class MCPRefactorArchitectureTests(unittest.TestCase):
+    def test_dispatch_in_worker_keeps_event_loop_responsive(self):
+        from mcp_stock_server.server import _dispatch_in_worker
+
+        started = threading.Event()
+        release = threading.Event()
+
+        class BlockingDispatcher:
+            def dispatch(self, **kwargs):
+                started.set()
+                release.wait(timeout=1)
+                return {"ok": True}
+
+        async def scenario():
+            task = asyncio.create_task(
+                _dispatch_in_worker(
+                    BlockingDispatcher(),
+                    name="get_technical_snapshot",
+                    args={},
+                    context=SimpleNamespace(),
+                )
+            )
+            await asyncio.to_thread(started.wait, 1)
+            await asyncio.sleep(0)
+            self.assertFalse(task.done())
+            release.set()
+            self.assertEqual(await task, {"ok": True})
+
+        asyncio.run(scenario())
+
     def test_mcp_runtime_config_parses_disabled_auth_defaults(self):
         from mcp_stock_server.main import MCPRuntimeConfig
 
@@ -1087,9 +1117,21 @@ class MCPRefactorArchitectureTests(unittest.TestCase):
         class FakeRecoveryCoordinator:
             def __init__(self):
                 self.registered = []
+                self.running = []
+                self.completed = []
+                self.failed = []
 
             async def register_task_definition(self, **kwargs):
                 self.registered.append(kwargs)
+
+            async def mark_task_running(self, task_id):
+                self.running.append(task_id)
+
+            async def mark_task_completed(self, task_id):
+                self.completed.append(task_id)
+
+            async def mark_task_failed(self, task_id, error):
+                self.failed.append((task_id, error))
 
         class FakeFastMCP:
             def __init__(self, name, **kwargs):
@@ -1168,6 +1210,25 @@ class MCPRefactorArchitectureTests(unittest.TestCase):
         self.assertEqual(recovery.registered[0]["tool_name"], "insert_stock_daily_bars_after_close")
         self.assertEqual(recovery.registered[0]["tool_args"], {"time": "2026-05-26"})
         self.assertTrue(recovery.registered[0]["replayable"])
+        self.assertEqual(recovery.running, [result.task.taskId])
+        self.assertEqual(recovery.completed, [result.task.taskId])
+
+        with patch(
+            "mcp_stock_server.server.ToolDispatcher.dispatch",
+            autospec=True,
+            side_effect=RuntimeError("dispatcher failed"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "dispatcher failed"):
+                asyncio.run(
+                    app.registered["insert_stock_daily_bars_after_close"](
+                        "2026-05-26", fake_ctx
+                    )
+                )
+
+        failed_task_id = experimental.captured_task_id
+        self.assertEqual(recovery.running[-1], failed_task_id)
+        self.assertEqual(recovery.failed[-1], (failed_task_id, "dispatcher failed"))
+        self.assertNotIn(failed_task_id, recovery.completed)
 
     def test_create_mcp_server_wraps_lifespan_to_schedule_recovery(self):
         from contextlib import asynccontextmanager
