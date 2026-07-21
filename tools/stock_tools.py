@@ -69,6 +69,9 @@ def screen_b1_stocks_tool(
             code = str(item.code)
             name = getattr(item, "name", None)
             code_name_map[code] = str(name) if name is not None else None
+            normalized_name = str(name or "").strip().upper()
+            if normalized_name.lstrip("*").startswith("ST"):
+                continue
         else:
             code = str(item)
             code_name_map[code] = None

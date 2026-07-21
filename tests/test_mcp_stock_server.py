@@ -406,6 +406,8 @@ class MCPStockServerTests(unittest.TestCase):
                 return [
                     StockCodeItem(code="000001", name="平安银行"),
                     StockCodeItem(code="000002", name="万科A"),
+                    StockCodeItem(code="000003", name="*ST中迪"),
+                    StockCodeItem(code="000004", name="ST旭电"),
                 ]
 
         class FakeStockDailyService:
