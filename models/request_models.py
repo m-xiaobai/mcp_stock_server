@@ -28,6 +28,17 @@ class UpsertStockDailyDataItem:
     trade_date: date
 
     def __post_init__(self) -> None:
+        if (
+            self.open == 0
+            and self.high == 0
+            and self.low == 0
+            and self.close > 0
+            and self.vol == 0
+            and self.amount == 0
+        ):
+            self.open = self.close
+            self.high = self.close
+            self.low = self.close
         if self.vol < 0:
             raise ValueError("vol must be >= 0")
         if self.amount < 0:
